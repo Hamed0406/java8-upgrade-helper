@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -423,6 +424,28 @@ def resolve_dependencies(entries):
     return [{"groupId": v["groupId"], "artifactId": v["artifactId"], "version": v["version"], "files": sorted(v["files"])} for v in merged.values()]
 
 
+def resolve_dependencies_with_timeout(entries, timeout_seconds):
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return resolve_dependencies(entries), False
+    if not hasattr(signal, "SIGALRM"):
+        return resolve_dependencies(entries), False
+
+    def _timeout_handler(_signum, _frame):
+        raise TimeoutError("dependency resolution timeout")
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, float(timeout_seconds))
+    try:
+        return resolve_dependencies(entries), False
+    except TimeoutError:
+        # Fallback avoids hanging scans on large/slow parent/BOM resolution paths.
+        return extract_declared_dependencies(entries), True
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 def current_repos():
     extra = [r.strip() for r in os.getenv(REPO_ENV, "").split(",") if r.strip()]
     return extra + DEFAULT_REPOS, extra
@@ -457,8 +480,8 @@ def dependency_java_hint(dep, target, latest):
     return {"severity": "low", "note": "No special Java-version rule detected for this dependency."}
 
 
-def run_dependency_checks(entries, target, include_transitive):
-    deps = resolve_dependencies(entries)
+def run_dependency_checks(entries, target, include_transitive, dep_resolve_timeout):
+    deps, dep_resolution_fallback = resolve_dependencies_with_timeout(entries, dep_resolve_timeout)
     repos, internal_repos = current_repos()
     limited = deps[:LOOKUP_LIMIT]
     by_ga = {}
@@ -517,6 +540,8 @@ def run_dependency_checks(entries, target, include_transitive):
         "pageSize": DEP_CHECK_PAGE_SIZE,
         "pageCount": max(1, (len(results) + DEP_CHECK_PAGE_SIZE - 1) // DEP_CHECK_PAGE_SIZE),
         "transitiveFallbackUsed": False,
+        "dependencyResolutionFallback": dep_resolution_fallback,
+        "note": "Dependency resolution timed out; used local declared-dependency fallback." if dep_resolution_fallback else "",
         "results": sorted(results, key=lambda r: r["ga"]),
     }
 
@@ -745,7 +770,7 @@ def write_report(report, fmt, out_path):
     return outputs
 
 
-def build_report(path, target, include_transitive, skip_deps, internal_prefixes):
+def build_report(path, target, include_transitive, skip_deps, internal_prefixes, dep_resolve_timeout):
     entries = collect_entries(path)
     if not entries:
         raise ValueError("No analyzable files found (.java, pom.xml, build.gradle, application.*).")
@@ -754,7 +779,7 @@ def build_report(path, target, include_transitive, skip_deps, internal_prefixes)
     if skip_deps:
         dep_checks = {"totalDetected": 0, "checkedCount": 0, "pageSize": DEP_CHECK_PAGE_SIZE, "pageCount": 1, "results": []}
     else:
-        dep_checks = run_dependency_checks(entries, target, include_transitive)
+        dep_checks = run_dependency_checks(entries, target, include_transitive, dep_resolve_timeout)
     report = {
         "target": target,
         "scannedFileCount": len(entries),
@@ -778,19 +803,25 @@ def parse_args():
     p.add_argument("--out", default="java-upgrade-report.json", help="Output file path (or prefix when --format all)")
     p.add_argument("--include-transitive", action="store_true", help="Enable 1-hop transitive dependency checks")
     p.add_argument("--skip-deps", action="store_true", help="Skip dependency checks (faster, offline-friendly)")
+    p.add_argument("--dep-resolve-timeout", type=int, default=45, help="Seconds for dependency model resolution before fallback (default: 45)")
     p.add_argument("--internal-prefixes", default="", help="Comma-separated internal artifact prefixes (e.g. c2b,com.myco)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    print("Scanning files...", file=sys.stderr)
     report = build_report(
         args.path,
         args.target,
         args.include_transitive,
         args.skip_deps,
         parse_prefixes(args.internal_prefixes),
+        args.dep_resolve_timeout,
     )
+    if report.get("dependencyChecks", {}).get("dependencyResolutionFallback"):
+        print("Dependency resolution timeout hit; used local fallback.", file=sys.stderr)
+    print("Writing report...", file=sys.stderr)
     outputs = write_report(report, args.format, args.out)
     for path in outputs:
         print(path)

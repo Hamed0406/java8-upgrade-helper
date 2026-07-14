@@ -62,6 +62,7 @@ python3 scan.py --path ./my-java-repo --target 17 --format json --out report.jso
 Useful flags:
 - `--include-transitive` -> enable 1-hop transitive dependency lookup
 - `--skip-deps` -> skip dependency checks (faster/offline)
+- `--dep-resolve-timeout 45` -> cap dependency model resolution time; auto-fallback if exceeded
 - `--internal-prefixes c2b,com.myco` -> improve internal artifact coverage
 - `--format all` -> write JSON/TXT/CSV/HTML files
 
