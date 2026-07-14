@@ -1,0 +1,14 @@
+# Local planning/backlog docs
+PLAN.md
+FEATURES.md
+
+# Python cache/artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Browser partial downloads
+*.crdownload
+
+# Generated scan reports
+java-upgrade-report-*

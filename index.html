@@ -1,0 +1,1691 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Java 8 Upgrade Helper</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0b1020; color: #e5e7eb; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 12px; }
+    p { color: #cbd5e1; }
+    .card { background: #11172b; border: 1px solid #1f2947; border-radius: 10px; padding: 16px; margin: 12px 0; }
+    textarea { width: 100%; min-height: 180px; resize: vertical; background: #0a0f1f; color: #e5e7eb; border: 1px solid #283455; border-radius: 8px; padding: 10px; }
+    button { background: #2563eb; color: white; border: 0; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    button:hover { background: #1d4ed8; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    ul { margin: 8px 0; }
+    li { margin: 6px 0; }
+    .muted { color: #94a3b8; }
+    .pill { display: inline-block; padding: 3px 8px; border: 1px solid #3a4d7a; border-radius: 999px; font-size: 12px; }
+    .ok { color: #86efac; }
+    .sev { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; }
+    .sev-high { background: #7f1d1d; color: #fecaca; border: 1px solid #b91c1c; }
+    .sev-medium { background: #78350f; color: #fde68a; border: 1px solid #d97706; }
+    .sev-low { background: #14532d; color: #bbf7d0; border: 1px solid #22c55e; }
+    code { background: #0a0f1f; padding: 2px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Java 8 → newer Java upgrade helper</h1>
+    <p>Paste code, upload files, or select a source folder. You get migration suggestions and a simple upgrade plan.</p>
+
+    <div class="card">
+      <div class="row">
+        <input id="fileInput" type="file" accept=".java,.xml,.gradle,.kts,.properties,.yml,.yaml,text/plain" multiple />
+        <input id="folderInput" type="file" webkitdirectory directory multiple />
+        <span class="pill" id="fileCount">0 files loaded</span>
+      </div>
+      <p class="muted">Run with <code>python3 server.py</code> for smart dependency checks (Maven + internal repos).</p>
+      <textarea id="codeInput" placeholder="Paste Java code here..."></textarea>
+      <div class="row">
+        <button id="analyzeBtn">Analyze</button>
+        <label for="targetVersion">Target:</label>
+        <select id="targetVersion">
+          <option value="11">Java 11</option>
+          <option value="17" selected>Java 17 LTS</option>
+          <option value="21">Java 21 LTS</option>
+          <option value="25">Java 25</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Findings</h2>
+      <div class="row">
+        <button id="expandBtn" type="button">Expand all</button>
+        <button id="exportBtn" type="button">Export report</button>
+        <label for="findingGroupBy">View:</label>
+        <select id="findingGroupBy">
+          <option value="flat" selected>Flat</option>
+          <option value="project">By project</option>
+        </select>
+        <label for="exportFormat">Format:</label>
+        <select id="exportFormat">
+          <option value="all" selected>ALL</option>
+          <option value="json">JSON</option>
+          <option value="txt">TXT</option>
+          <option value="csv">CSV</option>
+          <option value="html">HTML</option>
+        </select>
+        <label for="exportProfile">Profile:</label>
+        <select id="exportProfile">
+          <option value="all" selected>All</option>
+          <option value="high-only">High only</option>
+          <option value="unresolved-only">Unresolved deps only</option>
+          <option value="internal-only">Internal only</option>
+        </select>
+      </div>
+      <div id="scanSummary" class="muted"></div>
+      <div id="findings"><p class="muted">No findings yet.</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Upgrade plan</h2>
+      <div id="plan"><p class="muted">Run analysis to build a plan.</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Dependency checks</h2>
+      <div class="row">
+        <button id="depPrevBtn" type="button">Prev deps</button>
+        <button id="depNextBtn" type="button">Next deps</button>
+        <label for="depGroupBy">View:</label>
+        <select id="depGroupBy">
+          <option value="flat" selected>Flat</option>
+          <option value="project">By project</option>
+        </select>
+        <label><input id="includeTransitive" type="checkbox" checked /> 1-hop transitive</label>
+        <label for="internalPatterns">Internal prefixes:</label>
+        <input id="internalPatterns" type="text" placeholder="c2b,efsbase2,com.myco" />
+        <span id="depPageInfo" class="muted"></span>
+      </div>
+      <div id="depChecks"><p class="muted">Run analysis to check dependencies from pom/gradle files.</p></div>
+      <h3>Repository coverage (internal artifacts)</h3>
+      <div id="repoCoverage"><p class="muted">Run analysis to calculate internal artifact coverage.</p></div>
+    </div>
+
+    <div class="card">
+      <h2>OpenRewrite suggestions</h2>
+      <div id="rewriteHints"><p class="muted">Run analysis to get recipe suggestions.</p></div>
+    </div>
+  </div>
+
+  <script>
+    // ponytail: regex heuristics; move to AST/Semgrep engine only if false positives become expensive.
+    const RULES = [
+      {
+        id: "internal-jdk",
+        severity: "high",
+        title: "Internal JDK API usage (sun.* / com.sun.*)",
+        why: "These APIs are encapsulated in newer JDKs and often fail at runtime on Java 17+.",
+        action: "Replace with supported java.* APIs or maintained libraries.",
+        pattern: /\b(?:sun\.misc|sun\.reflect|com\.sun\.)\b/,
+        kinds: ["java", "pasted"]
+      },
+      {
+        id: "javax-migration",
+        severity: "high",
+        title: "Legacy javax imports detected",
+        why: "Modern Spring Boot/Jakarta stacks require jakarta.* namespace for many APIs.",
+        action: "Migrate javax.* imports to jakarta.* where framework versions require it.",
+        pattern: /\bimport\s+javax\.(?:annotation|xml\.bind|activation|servlet|persistence|validation|ws\.rs)\b/,
+        kinds: ["java", "pasted"]
+      },
+      {
+        id: "reflection-deep",
+        severity: "high",
+        title: "Deep reflection (setAccessible(true))",
+        why: "Strong encapsulation in modern JDKs can block this without extra JVM flags.",
+        action: "Prefer public APIs. If needed short-term, use explicit --add-opens while migrating.",
+        pattern: /\bsetAccessible\s*\(\s*true\s*\)/,
+        kinds: ["java", "pasted"]
+      },
+      {
+        id: "security-manager",
+        severity: "medium",
+        title: "SecurityManager usage",
+        why: "SecurityManager is deprecated/disabled path in newer JDKs.",
+        action: "Replace with process/container isolation and explicit permission boundaries.",
+        pattern: /\bSecurityManager\b/,
+        kinds: ["java", "pasted"]
+      },
+      {
+        id: "finalize",
+        severity: "medium",
+        title: "finalize() usage",
+        why: "finalize() is deprecated and unreliable for resource cleanup.",
+        action: "Use AutoCloseable + try-with-resources or Cleaner.",
+        pattern: /\bvoid\s+finalize\s*\(/,
+        kinds: ["java", "pasted"]
+      },
+      {
+        id: "illegal-access-flags",
+        severity: "medium",
+        title: "Temporary JVM access flags found",
+        why: "--add-opens/--illegal-access usually indicates compatibility debt.",
+        action: "Track and remove these flags after library/application updates.",
+        pattern: /\b--add-opens\b|\b--illegal-access\b/,
+        kinds: ["build", "config"]
+      }
+    ];
+
+    const ANALYZABLE_FILE_NAMES = [
+      "pom.xml",
+      "build.gradle",
+      "build.gradle.kts",
+      "gradle.properties",
+      "settings.gradle",
+      "settings.gradle.kts",
+      "application.properties",
+      "application.yml",
+      "application.yaml"
+    ];
+    const DEP_CHECK_PAGE_SIZE = 30;
+    const DEP_CHECK_TIMEOUT_MS = 20000;
+    const DEP_CHECK_TRANSITIVE_TIMEOUT_MS = 30000;
+
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function severityTag(severity) {
+      const s = (severity || "medium").toLowerCase();
+      const safe = s === "high" || s === "medium" || s === "low" ? s : "medium";
+      return `<span class="sev sev-${safe}">${safe.toUpperCase()}</span>`;
+    }
+
+    function parsePrefixList(raw) {
+      return String(raw || "")
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+    }
+
+    function fullName(file) {
+      return (file.webkitRelativePath || file.name || "").replaceAll("\\", "/");
+    }
+
+    function fileKindByName(name) {
+      const lower = name.toLowerCase();
+      if (lower.endsWith(".java")) return "java";
+      if (ANALYZABLE_FILE_NAMES.some((f) => lower.endsWith("/" + f)) || ANALYZABLE_FILE_NAMES.includes(lower)) {
+        if (lower.includes("application.")) return "config";
+        return "build";
+      }
+      return "other";
+    }
+
+    function isAnalyzableFile(file) {
+      const name = fullName(file).toLowerCase();
+      return fileKindByName(name) !== "other";
+    }
+
+    function isJavaFile(file) {
+      return fileKindByName(fullName(file)) === "java";
+    }
+
+    function firstMatchLine(content, regex) {
+      const noGlobalFlags = regex.flags.replaceAll("g", "");
+      const lineRegex = new RegExp(regex.source, noGlobalFlags);
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i += 1) {
+        if (lineRegex.test(lines[i])) return i + 1;
+      }
+      return 1;
+    }
+
+    function normalizeJavaLevel(raw) {
+      if (!raw) return null;
+      const v = String(raw).trim();
+      if (v === "1.8") return 8;
+      const n = Number(v.split(".")[0]);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function detectBootMajor(entries) {
+      const buildEntries = entries.filter((e) => e.kind === "build");
+      for (const entry of buildEntries) {
+        const txt = entry.content;
+        const parentMatch = txt.match(/<parent>([\s\S]*?)<\/parent>/i);
+        if (parentMatch && /spring-boot-starter-parent/i.test(parentMatch[1])) {
+          const v = textOf(parentMatch[1], "version");
+          const major = toMajor(v);
+          if (major) return major;
+        }
+        const propMatch = txt.match(/<spring-boot\.version>\s*([0-9]+)(?:\.[0-9]+)?/i);
+        if (propMatch) return Number(propMatch[1]);
+        const gradleMatch = txt.match(/org\.springframework\.boot["']?\s+version\s+["']([0-9]+)(?:\.[0-9]+)?/i);
+        if (gradleMatch) return Number(gradleMatch[1]);
+      }
+      return null;
+    }
+
+    function detectConfiguredJavaLevel(entries) {
+      const buildEntries = entries.filter((e) => e.kind === "build");
+      for (const entry of buildEntries) {
+        const txt = entry.content;
+        const checks = [
+          txt.match(/<java\.version>\s*([^<\s]+)\s*<\/java\.version>/i),
+          txt.match(/<maven\.compiler\.source>\s*([^<\s]+)\s*<\/maven\.compiler\.source>/i),
+          txt.match(/<maven\.compiler\.target>\s*([^<\s]+)\s*<\/maven\.compiler\.target>/i),
+          txt.match(/\bsourceCompatibility\s*=\s*["']([^"']+)["']/i),
+          txt.match(/\btargetCompatibility\s*=\s*["']([^"']+)["']/i)
+        ];
+        for (const m of checks) {
+          const level = normalizeJavaLevel(m && m[1]);
+          if (level) return level;
+        }
+      }
+      return null;
+    }
+
+    function firstMajorFrom(content, regex) {
+      const m = String(content || "").match(regex);
+      return m ? Number(m[1]) : null;
+    }
+
+    function detectFrameworkMajors(entries) {
+      const buildText = entries.filter((e) => e.kind === "build").map((e) => e.content).join("\n");
+      const allText = entries.map((e) => e.content).join("\n");
+      const deps = extractDependencies(entries);
+      const depMajor = (pred) => {
+        for (const d of deps) {
+          if (!pred(d)) continue;
+          const m = toMajor(d.version);
+          if (m) return m;
+        }
+        return null;
+      };
+      const hasDep = (pred) => deps.some((d) => pred(d));
+      const explicitBootMajor = detectBootMajor(entries);
+      const inferredBootMajor = depMajor((d) => d.groupId === "org.springframework.boot" || d.artifactId.startsWith("spring-boot"));
+      const bootMajor = explicitBootMajor || inferredBootMajor;
+      const bootSource = explicitBootMajor ? "explicit" : (inferredBootMajor ? "inferred" : "none");
+      const springMajor = firstMajorFrom(buildText, /<spring-framework\.version>\s*([0-9]+)(?:\.[0-9]+)?/i)
+        || depMajor((d) => d.groupId === "org.springframework" && d.artifactId.startsWith("spring-") && !d.artifactId.startsWith("spring-boot"));
+      const hibernateMajor = firstMajorFrom(buildText, /<hibernate(?:\.core)?\.version>\s*([0-9]+)(?:\.[0-9]+)?/i)
+        || depMajor((d) => (d.groupId === "org.hibernate" || d.groupId === "org.hibernate.orm") && d.artifactId === "hibernate-core");
+      const hasJakarta = /\bimport\s+jakarta\./.test(allText)
+        || hasDep((d) => String(d.groupId || "").startsWith("jakarta."));
+      const hasSpring = /org\.springframework|spring-boot|@SpringBootApplication|SpringApplication/.test(allText)
+        || hasDep((d) => d.groupId === "org.springframework" || d.groupId === "org.springframework.boot" || d.artifactId.startsWith("spring-"));
+      return { hasSpring, bootMajor, bootSource, springMajor, hibernateMajor, hasJakarta };
+    }
+
+    function frameworkMatrixFindings(target, framework, buildFileNames) {
+      const findings = [];
+      const matrixEvidence = buildFileNames.slice(0, 3).map((f) => `${f}:1`);
+      if (framework.hasSpring && target >= 17 && framework.bootMajor && framework.bootMajor < 3) {
+        findings.push({
+          severity: "high",
+          title: `Spring Boot ${framework.bootMajor}.x detected on Java ${target} path`,
+          why: "Java 17+ migrations typically need Spring Boot 3.x + Spring 6 + Jakarta namespace.",
+          action: "Plan Boot 2.7.latest stabilization first, then move to Boot 3.x on Java 17 with jakarta.* migration.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.hasSpring && target >= 17 && !framework.bootMajor) {
+        findings.push({
+          severity: "medium",
+          title: "Spring usage detected but Boot version not found",
+          why: "Compatibility depends on exact Spring/Spring Boot version.",
+          action: "Confirm current framework versions in build files and map them to Java target support matrix.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.bootMajor && framework.springMajor && framework.bootMajor >= 3 && framework.springMajor < 6) {
+        const explicit = framework.bootSource === "explicit";
+        findings.push({
+          severity: explicit ? "high" : "medium",
+          title: `Matrix mismatch: Boot ${framework.bootMajor}.x with Spring ${framework.springMajor}.x${explicit ? "" : " (inferred Boot)"}`,
+          why: explicit
+            ? "Boot 3.x+ is aligned with Spring 6.x+ and Jakarta APIs."
+            : "Inferred Boot major (from dependencies) conflicts with detected Spring major. Effective BOM may differ.",
+          action: explicit
+            ? "Check effective BOM/parent versions and align to a supported combination."
+            : "Resolve effective Boot version from parent/dependencyManagement and confirm matrix alignment.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.bootMajor && framework.bootMajor >= 3 && target < 17) {
+        findings.push({
+          severity: "high",
+          title: `Spring Boot ${framework.bootMajor}.x with Java ${target} target`,
+          why: "Boot 3.x+ requires Java 17+.",
+          action: "Raise target to Java 17+ or use Boot 2.7.x for lower targets.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.springMajor && framework.springMajor >= 6 && target < 17) {
+        findings.push({
+          severity: "high",
+          title: `Spring Framework ${framework.springMajor}.x with Java ${target} target`,
+          why: "Spring 6.x line requires Java 17+.",
+          action: "Use Spring 5.3.x for Java 11, or raise target to Java 17+ with Spring 6.x.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.hasSpring && target >= 17 && framework.springMajor && framework.springMajor < 6) {
+        findings.push({
+          severity: "medium",
+          title: `Spring Framework ${framework.springMajor}.x on Java ${target} path`,
+          why: "Java 17 migrations usually pair with Spring 6.x and Jakarta alignment.",
+          action: "Evaluate Spring 6.x upgrade timing and dependency compatibility before cutover.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.hasSpring && framework.bootMajor && framework.bootMajor >= 3 && !framework.hasJakarta) {
+        findings.push({
+          severity: "medium",
+          title: "Boot 3.x+ detected but Jakarta APIs not detected",
+          why: "Boot 3 migrations typically include jakarta.* API usage.",
+          action: "Verify javax->jakarta migration scope and dependencies.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.hibernateMajor && framework.hibernateMajor >= 6 && target < 11) {
+        findings.push({
+          severity: "medium",
+          title: `Hibernate ${framework.hibernateMajor}.x with Java ${target} target`,
+          why: "Hibernate 6.x needs newer Java baselines than Java 8.",
+          action: "Use Hibernate 5.x for Java 8, or raise target Java to 11+.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      if (framework.hasSpring || framework.hibernateMajor || framework.hasJakarta) {
+        const detected = [
+          `boot=${framework.bootMajor || "unknown"}(${framework.bootSource || "none"})`,
+          `spring=${framework.springMajor || "unknown"}`,
+          `hibernate=${framework.hibernateMajor || "unknown"}`,
+          `jakarta=${framework.hasJakarta ? "yes" : "no"}`
+        ].join(", ");
+        findings.push({
+          severity: "low",
+          title: "Framework compatibility matrix check",
+          why: `Detected ${detected}.`,
+          action: "Matrix: Java 11 -> Boot 2.7.x + Spring 5.3.x. Java 17+ -> Boot 3.x + Spring 6.x + Jakarta APIs.",
+          files: buildFileNames,
+          evidence: matrixEvidence
+        });
+      }
+      return findings;
+    }
+
+    function isStaticVersion(v) {
+      return !!v && !v.includes("${") && !v.includes("$") && !v.toLowerCase().includes("snapshot");
+    }
+
+    function toMajor(version) {
+      const m = String(version || "").match(/^(\d+)/);
+      return m ? Number(m[1]) : null;
+    }
+
+    function compareVersions(a, b) {
+      const pa = String(a || "").split(/[^0-9]+/).filter(Boolean).map(Number);
+      const pb = String(b || "").split(/[^0-9]+/).filter(Boolean).map(Number);
+      const len = Math.max(pa.length, pb.length);
+      for (let i = 0; i < len; i += 1) {
+        const av = pa[i] || 0;
+        const bv = pb[i] || 0;
+        if (av < bv) return -1;
+        if (av > bv) return 1;
+      }
+      return 0;
+    }
+
+    function normalizePath(path) {
+      const parts = String(path || "").replaceAll("\\", "/").split("/");
+      const out = [];
+      for (const p of parts) {
+        if (!p || p === ".") continue;
+        if (p === "..") out.pop();
+        else out.push(p);
+      }
+      return out.join("/");
+    }
+
+    function dirname(path) {
+      const n = normalizePath(path);
+      const idx = n.lastIndexOf("/");
+      return idx >= 0 ? n.slice(0, idx) : "";
+    }
+
+    function joinPath(base, rel) {
+      return normalizePath((base ? base + "/" : "") + rel);
+    }
+
+    function textOf(tagBody, tagName) {
+      const m = String(tagBody || "").match(new RegExp(`<${tagName}>\\s*([\\s\\S]*?)\\s*<\\/${tagName}>`, "i"));
+      return m ? m[1].trim() : null;
+    }
+
+    function parsePomProperties(text) {
+      const props = {};
+      const blockMatch = String(text).match(/<properties>([\s\S]*?)<\/properties>/i);
+      if (!blockMatch) return props;
+      const propRegex = /<([a-zA-Z0-9_.-]+)>\s*([^<]+)\s*<\/\1>/g;
+      let m;
+      while ((m = propRegex.exec(blockMatch[1])) !== null) props[m[1]] = m[2].trim();
+      return props;
+    }
+
+    function interpolate(raw, props, depth = 0) {
+      if (!raw) return null;
+      if (depth > 6) return String(raw).trim();
+      const next = String(raw).replace(/\$\{([^}]+)\}/g, (_, k) => (props && props[k] != null ? props[k] : `\${${k}}`));
+      if (next === raw) return next.trim();
+      return interpolate(next, props, depth + 1);
+    }
+
+    function parsePomDependencyBlocks(text) {
+      const dmRanges = [];
+      const dmRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/gi;
+      let dm;
+      while ((dm = dmRegex.exec(text)) !== null) dmRanges.push([dm.index, dm.index + dm[0].length]);
+
+      const depRegex = /<dependency>([\s\S]*?)<\/dependency>/gi;
+      const regular = [];
+      const managed = [];
+      let m;
+      while ((m = depRegex.exec(text)) !== null) {
+        const body = m[1];
+        const dep = {
+          groupId: textOf(body, "groupId"),
+          artifactId: textOf(body, "artifactId"),
+          version: textOf(body, "version"),
+          scope: textOf(body, "scope"),
+          type: textOf(body, "type")
+        };
+        if (!dep.groupId || !dep.artifactId) continue;
+        const inDm = dmRanges.some(([s, e]) => m.index >= s && m.index < e);
+        (inDm ? managed : regular).push(dep);
+      }
+      return { regular, managed };
+    }
+
+    function parseParentRef(text) {
+      const pm = String(text).match(/<parent>([\s\S]*?)<\/parent>/i);
+      if (!pm) return null;
+      const b = pm[1];
+      const groupId = textOf(b, "groupId");
+      const artifactId = textOf(b, "artifactId");
+      const version = textOf(b, "version");
+      const relativePath = textOf(b, "relativePath") || "../pom.xml";
+      if (!groupId || !artifactId) return null;
+      return { groupId, artifactId, version, relativePath };
+    }
+
+    function parsePomModel(entry) {
+      const text = entry.content;
+      const depsStart = text.search(/<dependencies>/i);
+      const head = depsStart >= 0 ? text.slice(0, depsStart) : text;
+      const headNoParent = head.replace(/<parent>[\s\S]*?<\/parent>/i, "");
+      const dep = parsePomDependencyBlocks(text);
+      return {
+        name: entry.name,
+        text,
+        groupId: textOf(headNoParent, "groupId"),
+        artifactId: textOf(headNoParent, "artifactId"),
+        version: textOf(headNoParent, "version"),
+        parent: parseParentRef(text),
+        properties: parsePomProperties(text),
+        dependencies: dep.regular,
+        managedDependencies: dep.managed
+      };
+    }
+
+    function effectivePomModels(entries) {
+      const poms = entries.filter((e) => e.kind === "build" && e.name.toLowerCase().endsWith("pom.xml")).map(parsePomModel);
+      const byPath = new Map(poms.map((p) => [normalizePath(p.name), p]));
+      const byGaVersion = new Map();
+      const byArtifact = new Map();
+      for (const p of poms) {
+        const g = p.groupId || (p.parent && p.parent.groupId) || "";
+        const v = p.version || (p.parent && p.parent.version) || "";
+        if (g && p.artifactId && v) byGaVersion.set(`${g}:${p.artifactId}:${v}`, p);
+        if (p.artifactId) byArtifact.set(p.artifactId, p);
+      }
+
+      function findParent(model) {
+        if (!model.parent) return null;
+        const pg = model.parent.groupId;
+        const pa = model.parent.artifactId;
+        const pv = model.parent.version || "";
+        if (pg && pa && pv && byGaVersion.has(`${pg}:${pa}:${pv}`)) return byGaVersion.get(`${pg}:${pa}:${pv}`);
+        const rel = model.parent.relativePath || "../pom.xml";
+        const relPath = joinPath(dirname(model.name), rel);
+        if (byPath.has(relPath)) return byPath.get(relPath);
+        if (byArtifact.has(pa)) return byArtifact.get(pa);
+        return null;
+      }
+
+      const memo = new Map();
+      const stack = new Set();
+      function resolve(model) {
+        const key = normalizePath(model.name);
+        if (memo.has(key)) return memo.get(key);
+        if (stack.has(key)) {
+          return { groupId: model.groupId || null, version: model.version || null, properties: { ...model.properties }, managed: {}, dependencies: [] };
+        }
+        stack.add(key);
+        const parentModel = findParent(model);
+        const parentEff = parentModel ? resolve(parentModel) : null;
+        const effGroup = interpolate(model.groupId || (parentEff && parentEff.groupId) || (model.parent && model.parent.groupId) || "", parentEff ? parentEff.properties : {}) || null;
+        const effVersion = interpolate(model.version || (parentEff && parentEff.version) || (model.parent && model.parent.version) || "", parentEff ? parentEff.properties : {}) || null;
+        const props = {
+          ...(parentEff ? parentEff.properties : {}),
+          ...Object.fromEntries(Object.entries(model.properties).map(([k, v]) => [k, interpolate(v, parentEff ? parentEff.properties : {})])),
+        };
+        props["project.groupId"] = effGroup || "";
+        props["pom.groupId"] = effGroup || "";
+        props["project.version"] = effVersion || "";
+        props["pom.version"] = effVersion || "";
+        props["project.artifactId"] = model.artifactId || "";
+        props["pom.artifactId"] = model.artifactId || "";
+        if (parentEff) {
+          props["project.parent.groupId"] = parentEff.groupId || "";
+          props["project.parent.version"] = parentEff.version || "";
+        }
+
+        const managed = { ...(parentEff ? parentEff.managed : {}) };
+        for (const d of model.managedDependencies) {
+          const ga = `${interpolate(d.groupId, props)}:${interpolate(d.artifactId, props)}`;
+          const scope = interpolate(d.scope || "", props);
+          const type = interpolate(d.type || "jar", props);
+          const ver = interpolate(d.version || "", props);
+          if (scope === "import" && type === "pom" && ver) {
+            const bom = byGaVersion.get(`${interpolate(d.groupId, props)}:${interpolate(d.artifactId, props)}:${ver}`);
+            if (bom) {
+              const bomEff = resolve(bom);
+              Object.assign(managed, bomEff.managed);
+            }
+          } else if (ver) {
+            managed[ga] = ver;
+          }
+        }
+
+        const dependencies = model.dependencies.map((d) => {
+          const g = interpolate(d.groupId, props);
+          const a = interpolate(d.artifactId, props);
+          const explicit = interpolate(d.version || "", props);
+          const v = explicit || managed[`${g}:${a}`] || null;
+          return { groupId: g, artifactId: a, version: v };
+        });
+
+        const eff = { groupId: effGroup, version: effVersion, properties: props, managed, dependencies };
+        memo.set(key, eff);
+        stack.delete(key);
+        return eff;
+      }
+
+      return { poms, resolve };
+    }
+
+    function extractDependencies(entries) {
+      const map = new Map();
+      const effective = effectivePomModels(entries);
+      for (const pom of effective.poms) {
+        const eff = effective.resolve(pom);
+        for (const d of eff.dependencies) {
+          if (!d.groupId || !d.artifactId) continue;
+          const key = `${d.groupId}:${d.artifactId}`;
+          if (!map.has(key)) map.set(key, { groupId: d.groupId, artifactId: d.artifactId, versions: new Set(), files: new Set() });
+          if (d.version) map.get(key).versions.add(d.version);
+          map.get(key).files.add(pom.name);
+        }
+      }
+
+      for (const entry of entries.filter((e) => e.kind === "build" && !e.name.toLowerCase().endsWith("pom.xml"))) {
+        const text = entry.content;
+        const gradleRegex = /\b(?:implementation|api|compileOnly|runtimeOnly|testImplementation|annotationProcessor)\s*\(?\s*["']([^:"']+):([^:"']+):([^"']+)["']\s*\)?/g;
+        let match;
+        while ((match = gradleRegex.exec(text)) !== null) {
+          const groupId = match[1];
+          const artifactId = match[2];
+          const version = (match[3] || "").trim() || null;
+          const key = `${groupId}:${artifactId}`;
+          if (!map.has(key)) map.set(key, { groupId, artifactId, versions: new Set(), files: new Set() });
+          if (version) map.get(key).versions.add(version);
+          map.get(key).files.add(entry.name);
+        }
+      }
+      return [...map.values()].map((d) => ({
+        groupId: d.groupId,
+        artifactId: d.artifactId,
+        version: [...d.versions][0] || null,
+        files: [...d.files]
+      }));
+    }
+
+    function dependencyJavaHint(dep, targetJava, latestVersion) {
+      const ga = `${dep.groupId}:${dep.artifactId}`;
+      const currentMajor = toMajor(dep.version);
+      const latestMajor = toMajor(latestVersion);
+      if (dep.groupId === "org.springframework.boot" || dep.artifactId.startsWith("spring-boot")) {
+        if (targetJava >= 17 && !currentMajor) {
+          return { severity: "medium", note: `Spring Boot version is managed (not explicit). Verify effective version is Boot 3.x+ for Java ${targetJava} target.` };
+        }
+        if (targetJava >= 17 && currentMajor && currentMajor < 3) {
+          return { severity: "high", note: "Boot 2.x on Java 17+ path. Plan move to Boot 3.x (Jakarta migration)." };
+        }
+        if (targetJava < 17 && currentMajor && currentMajor >= 3) {
+          return { severity: "high", note: "Boot 3.x requires Java 17+; this target is too low." };
+        }
+      }
+      if (dep.groupId === "org.springframework" || dep.artifactId.startsWith("spring-")) {
+        if (targetJava >= 17 && currentMajor && currentMajor < 6) {
+          return { severity: "medium", note: "Spring 5.x on Java 17 path; verify upgrade plan to Spring 6.x with Boot 3/Jakarta." };
+        }
+        if (targetJava < 17 && latestMajor && latestMajor >= 6) {
+          return { severity: "medium", note: "Spring 6.x line usually needs Java 17+; keep compatible major for lower target." };
+        }
+      }
+      if (ga === "jakarta.servlet:jakarta.servlet-api" && targetJava < 11) {
+        return { severity: "medium", note: "Jakarta ecosystem is usually aligned with newer Java and Boot 3+ stacks." };
+      }
+      if ((dep.groupId === "org.hibernate.orm" || dep.groupId === "org.hibernate") && dep.artifactId === "hibernate-core") {
+        if (targetJava < 11 && ((currentMajor && currentMajor >= 6) || (latestMajor && latestMajor >= 6))) {
+          return { severity: "medium", note: "Hibernate 6.x generally requires Java 11+; keep Hibernate 5.x for Java 8 targets." };
+        }
+      }
+      return { severity: "low", note: "No special Java-version rule detected for this dependency." };
+    }
+
+    function extractGradleOnly(entries) {
+      const map = new Map();
+      for (const entry of entries.filter((e) => e.kind === "build" && !e.name.toLowerCase().endsWith("pom.xml"))) {
+        const text = entry.content;
+        const gradleRegex = /\b(?:implementation|api|compileOnly|runtimeOnly|testImplementation|annotationProcessor)\s*\(?\s*["']([^:"']+):([^:"']+):([^"']+)["']\s*\)?/g;
+        let match;
+        while ((match = gradleRegex.exec(text)) !== null) {
+          const groupId = match[1];
+          const artifactId = match[2];
+          const version = (match[3] || "").trim() || null;
+          const key = `${groupId}:${artifactId}`;
+          if (!map.has(key)) map.set(key, { groupId, artifactId, versions: new Set(), files: new Set() });
+          if (version) map.get(key).versions.add(version);
+          map.get(key).files.add(entry.name);
+        }
+      }
+      return [...map.values()].map((d) => ({
+        groupId: d.groupId,
+        artifactId: d.artifactId,
+        version: [...d.versions][0] || null,
+        files: [...d.files]
+      }));
+    }
+
+    async function resolveDependenciesWithServer(entries) {
+      const poms = entries
+        .filter((e) => e.kind === "build" && e.name.toLowerCase().endsWith("pom.xml"))
+        .map((e) => ({ name: e.name, content: e.content }));
+      const gradles = entries
+        .filter((e) => e.kind === "build" && !e.name.toLowerCase().endsWith("pom.xml"))
+        .map((e) => ({ name: e.name, content: e.content }));
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 20000);
+      try {
+        const res = await fetch("/api/maven-resolve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ poms, gradles }),
+          signal: ctrl.signal
+        });
+        if (!res.ok) throw new Error(`Maven resolve API failed: HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.dependencies || !Array.isArray(data.dependencies)) throw new Error("Invalid maven resolve response");
+        return data.dependencies;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function runDependencyChecks(entries, targetJava) {
+      let deps;
+      try {
+        // Preferred path: backend resolves Maven model (including remote parent/BOM).
+        deps = await resolveDependenciesWithServer(entries);
+      } catch (err) {
+        // Fallback path: local-only parsing if backend endpoint is unavailable.
+        const pomLocal = extractDependencies(entries).filter((d) => d.files.some((f) => f.toLowerCase().endsWith("pom.xml")));
+        const gradleLocal = extractGradleOnly(entries);
+        deps = [...pomLocal, ...gradleLocal];
+      }
+      const includeTransitiveDeps = !!(includeTransitive && includeTransitive.checked);
+      const apiChunkSize = includeTransitiveDeps ? 8 : DEP_CHECK_PAGE_SIZE;
+      const transitivePerDepLimit = includeTransitiveDeps ? 12 : 0;
+      const results = [];
+      const totalPages = Math.max(1, Math.ceil(deps.length / apiChunkSize));
+      let transitiveFallbackUsed = false;
+
+      async function callDependencyApi(payload, timeoutMs) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+          const res = await fetch("/api/dependency-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: ctrl.signal
+          });
+          if (!res.ok) throw new Error(`Dependency API failed: HTTP ${res.status}`);
+          return await res.json();
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      for (let page = 0; page < totalPages; page += 1) {
+        const chunk = deps.slice(page * apiChunkSize, (page + 1) * apiChunkSize);
+        const payload = {
+          targetJava,
+          includeTransitive: includeTransitiveDeps,
+          transitivePerDepLimit,
+          dependencies: chunk.map((d) => ({
+            groupId: d.groupId,
+            artifactId: d.artifactId,
+            version: d.version
+          }))
+        };
+        let data = { results: [] };
+        try {
+          const timeoutMs = includeTransitiveDeps ? DEP_CHECK_TRANSITIVE_TIMEOUT_MS : DEP_CHECK_TIMEOUT_MS;
+          data = await callDependencyApi(payload, timeoutMs);
+        } catch (err) {
+          if (includeTransitiveDeps) {
+            try {
+              data = await callDependencyApi({ ...payload, includeTransitive: false }, DEP_CHECK_TIMEOUT_MS);
+              transitiveFallbackUsed = true;
+            } catch (fallbackErr) {
+              data = { results: [] };
+            }
+          } else {
+            data = { results: [] };
+          }
+        }
+
+        const byGa = new Map((data.results || []).map((r) => [r.ga, r]));
+        for (const dep of chunk) {
+          const ga = `${dep.groupId}:${dep.artifactId}`;
+          const api = byGa.get(ga);
+          if (!api) {
+            const hint = dependencyJavaHint(dep, targetJava, null);
+            results.push({
+              ga,
+              currentVersion: dep.version || "(not explicit)",
+              latestVersion: "(not found)",
+              upgradeAvailable: null,
+              compatibility: hint.note,
+              severity: "medium",
+              source: "none",
+              note: "Lookup failed for this page or dependency.",
+              files: dep.files,
+              transitiveCount: 0,
+              transitive: [],
+              checked: false
+            });
+            continue;
+          }
+          const current = dep.version || "(not explicit)";
+          const currentKnown = isStaticVersion(dep.version || "");
+          const latest = api.latestVersion || "(not found)";
+          const hint = dependencyJavaHint(dep, targetJava, api.latestVersion || null);
+          const upgradeAvailable = currentKnown && api.latestVersion ? compareVersions(dep.version, api.latestVersion) < 0 : null;
+          results.push({
+            ga,
+            currentVersion: current,
+            latestVersion: latest,
+            upgradeAvailable,
+            compatibility: hint.note,
+            severity: api.status === "ok" ? hint.severity : "medium",
+            source: api.source || "none",
+            note: api.note || "",
+            files: dep.files,
+            transitiveCount: Number(api.transitiveCount || 0),
+            transitive: Array.isArray(api.transitive) ? api.transitive : [],
+            checked: api.status === "ok"
+          });
+        }
+      }
+      return {
+        totalDetected: deps.length,
+        checkedCount: results.length,
+        pageSize: DEP_CHECK_PAGE_SIZE,
+        pageCount: Math.max(1, Math.ceil(results.length / DEP_CHECK_PAGE_SIZE)),
+        transitiveFallbackUsed,
+        results
+      };
+    }
+
+    function analyzeEntries(entries, target) {
+      const findings = [];
+      const allText = entries.map((e) => e.content).join("\n\n");
+      const framework = detectFrameworkMajors(entries);
+      const hasSpring = framework.hasSpring;
+      const bootMajor = framework.bootMajor;
+      const configuredJava = detectConfiguredJavaLevel(entries);
+      const buildFileNames = entries.filter((e) => e.kind === "build").map((e) => e.name);
+
+      for (const rule of RULES) {
+        const evidence = [];
+        const files = [];
+        for (const entry of entries) {
+          if (!rule.kinds.includes(entry.kind)) continue;
+          if (!rule.pattern.test(entry.content)) continue;
+          files.push(entry.name);
+          evidence.push(`${entry.name}:${firstMatchLine(entry.content, rule.pattern)}`);
+        }
+        if (evidence.length) {
+          findings.push({
+            severity: rule.severity,
+            title: rule.title,
+            why: rule.why,
+            action: rule.action,
+            files: [...new Set(files)],
+            evidence
+          });
+        }
+      }
+
+      if (/\bStream\b/.test(allText) && !/\bparallelStream\b/.test(allText)) {
+        const streamFiles = entries
+          .filter((e) => /\bStream\b/.test(e.content))
+          .map((e) => e.name);
+        findings.push({
+          severity: "low",
+          title: "Streams detected (performance review candidate)",
+          why: "Not a migration blocker, but hotspot tuning can differ on newer JDKs.",
+          action: "Profile first, then optimize only bottlenecks.",
+          files: [...new Set(streamFiles)],
+          evidence: []
+        });
+      }
+
+      findings.push(...frameworkMatrixFindings(target, framework, buildFileNames));
+
+      if (configuredJava && configuredJava < target) {
+        findings.push({
+          severity: "medium",
+          title: `Build is pinned to Java ${configuredJava}`,
+          why: "Current compiler/runtime level is below selected migration target.",
+          action: `Update build Java level in Maven/Gradle to ${target} during migration.`,
+          files: buildFileNames,
+          evidence: entries.filter((e) => e.kind === "build").slice(0, 3).map((e) => `${e.name}:1`)
+        });
+      }
+
+      return { findings, context: { hasSpring, bootMajor, configuredJava, framework } };
+    }
+
+    function planFromAnalysis(findings, target, context) {
+      const path = [11, 17, 21, 25].filter((v) => v <= target);
+      const plan = ["Build + test baseline on Java 8 and freeze dependency versions."];
+      if (context.hasSpring && target >= 17 && context.bootMajor && context.bootMajor < 3) {
+        plan.push("For Spring Boot: upgrade to 2.7.latest first, then migrate to Boot 3.x/Spring 6 on Java 17.");
+      } else if (context.hasSpring) {
+        plan.push("Verify Spring/Spring Boot compatibility for each Java jump before upgrading production.");
+      }
+      if (findings.some((f) => f.title.includes("Legacy javax imports"))) {
+        plan.push("Migrate javax.* APIs to jakarta.* where required by your framework stack.");
+      }
+      if (findings.some((f) => f.severity === "high" || f.severity === "medium")) {
+        plan.push("Fix high/medium findings before final cutover.");
+      }
+      for (const v of path) {
+        const isLts = v === 17 || v === 21;
+        plan.push(`Upgrade to Java ${v}${isLts ? " LTS" : ""}, then compile/test and fix blockers.`);
+      }
+      plan.push("Remove temporary JVM compatibility flags and run performance regression checks.");
+      return plan.map((step, i) => `${i + 1}) ${step}`);
+    }
+
+    function renderDependencyChecks(depReport, targetJava, page) {
+      if (!depReport || !depReport.results || !depReport.results.length) {
+        return "<p class='muted'>No Maven/Gradle dependencies with explicit coordinates were detected.</p>";
+      }
+      return renderDependencyChecksView(depReport, targetJava, page, "flat", null);
+    }
+
+    function projectRootsFromSummary(summary) {
+      const roots = [...new Set(((summary && summary.buildFiles) || []).map((p) => dirname(p)).filter(Boolean))];
+      roots.sort((a, b) => b.length - a.length);
+      return roots;
+    }
+
+    function projectFromFile(path, projectRoots) {
+      const normalized = normalizePath(path);
+      if (!normalized) return "(unknown)";
+      if (normalized === "pasted-input") return "(pasted-input)";
+      for (const root of projectRoots || []) {
+        if (normalized === root || normalized.startsWith(root + "/")) return root;
+      }
+      const parts = normalized.split("/");
+      if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
+      return parts[0];
+    }
+
+    function projectsForFiles(files, summary) {
+      const roots = projectRootsFromSummary(summary);
+      return [...new Set((files || []).map((f) => projectFromFile(f, roots)))].sort();
+    }
+
+    function groupItemsByProject(items, summary) {
+      const roots = projectRootsFromSummary(summary);
+      const groups = new Map();
+      for (const item of items || []) {
+        const projects = [...new Set((item.files || []).map((f) => projectFromFile(f, roots)))];
+        for (const project of projects) {
+          if (!groups.has(project)) groups.set(project, []);
+          groups.get(project).push(item);
+        }
+      }
+      return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    }
+
+    function buildRewriteSuggestions(findings, depReport) {
+      const out = new Map();
+      const add = (recipe, why) => {
+        if (!out.has(recipe)) out.set(recipe, why);
+      };
+      for (const f of findings || []) {
+        const title = String(f.title || "");
+        if (title.includes("Legacy javax imports")) add("org.openrewrite.java.migrate.jakarta.JavaxMigrationToJakarta", "javax -> jakarta migration");
+        if (title.includes("Spring Boot 2.x")) add("org.openrewrite.java.spring.boot3.UpgradeSpringBoot_3_2", "Boot 2.x -> 3.x migration path");
+        if (title.includes("finalize()")) add("org.openrewrite.java.migrate.lang.MigrateClassNewInstanceToGetDeclaredConstructorNewInstance", "cleanup deprecated Java patterns");
+        if (title.includes("Internal JDK API")) add("org.openrewrite.java.migrate.UpgradeToJava17", "replace internal JDK usage and modernize code");
+      }
+      for (const d of ((depReport && depReport.results) || [])) {
+        if (String(d.ga || "").startsWith("org.springframework.boot:") && String(d.currentVersion || "").startsWith("2.")) {
+          add("org.openrewrite.java.spring.boot3.UpgradeSpringBoot_3_2", "dependency report indicates Boot 2.x");
+        }
+      }
+      return [...out.entries()].map(([recipe, why]) => ({ recipe, why }));
+    }
+
+    function renderRewriteSuggestions(items) {
+      if (!(items || []).length) return "<p class='muted'>No specific recipe suggestions yet.</p>";
+      return `<ul>${items.map((r) => `<li><strong>${escapeHtml(r.recipe)}</strong><br/><span class="muted">${escapeHtml(r.why)}</span></li>`).join("")}</ul>`;
+    }
+
+    function renderDependencyChecksView(depReport, targetJava, page, viewMode, summary) {
+      if (!depReport || !depReport.results || !depReport.results.length) {
+        return "<p class='muted'>No Maven/Gradle dependencies with explicit coordinates were detected.</p>";
+      }
+      if (viewMode === "project") {
+        const grouped = groupItemsByProject(depReport.results, summary);
+        const status = `<p class="muted">Checked ${depReport.checkedCount}/${depReport.totalDetected} dependencies for target Java ${targetJava}. Grouped by ${grouped.length} project(s).</p>`;
+        const html = grouped.map(([project, items]) => {
+          const ordered = [...items].sort((a, b) => String(a.ga || "").localeCompare(String(b.ga || "")));
+          return `<h4>${escapeHtml(project)} (${items.length})</h4><ul>${ordered.map((r) => {
+            const upgradeText = r.upgradeAvailable === null
+              ? "upgrade: unknown"
+              : (r.upgradeAvailable ? "upgrade: newer version available" : "upgrade: current is up-to-date or newer");
+            const source = r.source ? ` | source: ${escapeHtml(r.source)}` : "";
+            const note = r.note ? `<br/><span class="muted">${escapeHtml(r.note)}</span>` : "";
+            const transitive = Number(r.transitiveCount || 0) > 0 ? `<br/><span class="muted">transitive(1-hop): ${Number(r.transitiveCount || 0)}</span>` : "";
+            return `<li><strong>${severityTag(r.severity)} ${escapeHtml(r.ga)}</strong><br/><span class="muted">current: ${escapeHtml(r.currentVersion)} | latest: ${escapeHtml(r.latestVersion)} | ${upgradeText}${source}</span><br/><span class="muted">${escapeHtml(r.compatibility)}</span>${note}${transitive}</li>`;
+          }).join("")}</ul>`;
+        }).join("");
+        return status + html;
+      }
+      const pageSize = depReport.pageSize || DEP_CHECK_PAGE_SIZE;
+      const pageCount = depReport.pageCount || Math.max(1, Math.ceil(depReport.results.length / pageSize));
+      const safePage = Math.min(Math.max(page || 1, 1), pageCount);
+      const start = (safePage - 1) * pageSize;
+      const end = start + pageSize;
+      const pageItems = depReport.results.slice(start, end);
+      const fallback = depReport.transitiveFallbackUsed ? " Transitive timed out on some chunks; base lookup used for those chunks." : "";
+      const status = `<p class="muted">Checked ${depReport.checkedCount}/${depReport.totalDetected} dependencies for target Java ${targetJava}. Showing page ${safePage}/${pageCount}.${escapeHtml(fallback)}</p>`;
+      return `${status}<ul>${pageItems.map((r) => {
+        const upgradeText = r.upgradeAvailable === null
+          ? "upgrade: unknown"
+          : (r.upgradeAvailable ? "upgrade: newer version available" : "upgrade: current is up-to-date or newer");
+        const source = r.source ? ` | source: ${escapeHtml(r.source)}` : "";
+        const note = r.note ? `<br/><span class="muted">${escapeHtml(r.note)}</span>` : "";
+        const projects = (r.projects || projectsForFiles(r.files || [], summary)).join(", ");
+        const transitive = Number(r.transitiveCount || 0) > 0 ? `<br/><span class="muted">transitive(1-hop): ${Number(r.transitiveCount || 0)}</span>` : "";
+        return `<li><strong>${severityTag(r.severity)} ${escapeHtml(r.ga)}</strong><br/><span class="muted">current: ${escapeHtml(r.currentVersion)} | latest: ${escapeHtml(r.latestVersion)} | ${upgradeText}${source}</span><br/><span class="muted">${escapeHtml(r.compatibility)}</span>${note}${transitive}<br/><span class="muted">files: ${escapeHtml((r.files || []).join(", "))}</span><br/><span class="muted">projects: ${escapeHtml(projects || "(unknown)")}</span></li>`;
+      }).join("")}</ul>`;
+    }
+
+    function parseGa(ga) {
+      const parts = String(ga || "").split(":");
+      return { groupId: parts[0] || "", artifactId: parts[1] || "" };
+    }
+
+    function isInternalCandidate(dep, prefixes) {
+      const ga = parseGa(dep.ga);
+      const configured = (prefixes || []).some((p) => ga.groupId.toLowerCase().startsWith(p) || ga.artifactId.toLowerCase().startsWith(p));
+      if (configured) return true;
+      const groupLooksInternal = ga.groupId && !ga.groupId.includes(".");
+      const versionLooksInternal = String(dep.currentVersion || "").toUpperCase().includes("SNAPSHOT");
+      const unresolved = !dep.checked || !dep.source || dep.source === "none";
+      return groupLooksInternal || versionLooksInternal || unresolved;
+    }
+
+    function computeRepoCoverage(depReport, internalPrefixes) {
+      const all = (depReport && depReport.results) || [];
+      // ponytail: heuristic internal detection; replace with configured org/group patterns for precision.
+      const internal = all.filter((d) => isInternalCandidate(d, internalPrefixes));
+      const resolved = internal.filter((d) => d.checked && d.source && d.source !== "none");
+      const unresolved = internal.filter((d) => !(d.checked && d.source && d.source !== "none"));
+      const pct = internal.length ? Math.round((resolved.length * 100) / internal.length) : 100;
+      return {
+        totalInternal: internal.length,
+        resolvedInternal: resolved.length,
+        unresolvedInternal: unresolved.length,
+        coveragePercent: pct,
+        unresolvedList: unresolved
+      };
+    }
+
+    function renderRepoCoverage(coverage, viewMode, summaryData) {
+      if (!coverage) return "<p class='muted'>Run analysis to calculate internal artifact coverage.</p>";
+      const summaryText = `<p class="muted">internal resolved: ${coverage.resolvedInternal}/${coverage.totalInternal} (${coverage.coveragePercent}%) | unresolved: ${coverage.unresolvedInternal}</p>`;
+      if (!coverage.unresolvedList.length) return `${summaryText}<p class="ok">All internal candidates resolved in configured repositories.</p>`;
+      if (viewMode === "project") {
+        const grouped = groupItemsByProject(coverage.unresolvedList, summaryData);
+        return `${summaryText}${grouped.map(([project, items]) => `<h4>${escapeHtml(project)} (${items.length})</h4><ul>${items.slice(0, 10).map((d) => `<li><strong>${escapeHtml(d.ga)}</strong><br/><span class="muted">current: ${escapeHtml(d.currentVersion || "(unknown)")} | source: ${escapeHtml(d.source || "none")}</span></li>`).join("")}</ul>`).join("")}`;
+      }
+      const top = coverage.unresolvedList.slice(0, 20);
+      return `${summaryText}<ul>${top.map((d) => `<li><strong>${escapeHtml(d.ga)}</strong><br/><span class="muted">current: ${escapeHtml(d.currentVersion || "(unknown)")} | source: ${escapeHtml(d.source || "none")}</span><br/><span class="muted">files: ${escapeHtml((d.files || []).join(", "))}</span></li>`).join("")}</ul>`;
+    }
+
+    function renderFindings(findings, scannedFileCount, expanded, viewMode, summary) {
+      if (!findings.length) {
+        return `<p class='ok'>No obvious migration blockers found in ${scannedFileCount} scanned files/input blocks.</p>`;
+      }
+      const severityOrder = { high: 1, medium: 2, low: 3 };
+      const ordered = [...findings].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+      if (viewMode === "project") {
+        const grouped = groupItemsByProject(ordered, summary);
+        return `<p class="muted">${ordered.length} finding(s) across ${grouped.length} project(s) and ${scannedFileCount} scanned files/input blocks.</p>${grouped.map(([project, items]) => `<h4>${escapeHtml(project)} (${items.length})</h4><ul>${items.map((f) => {
+          const maxItems = expanded ? Number.MAX_SAFE_INTEGER : 3;
+          const evidenceItems = (f.evidence || []).slice(0, maxItems);
+          const evidence = evidenceItems.length
+            ? `<br/><span class="muted">evidence: ${escapeHtml(evidenceItems.join(", "))}${!expanded && f.evidence.length > maxItems ? ", ..." : ""}</span>`
+            : "";
+          return `<li><strong>${severityTag(f.severity)} ${escapeHtml(f.title)}</strong><br/>${escapeHtml(f.why)}<br/><span class="muted">${escapeHtml(f.action)}</span>${evidence}</li>`;
+        }).join("")}</ul>`).join("")}`;
+      }
+      return `
+        <p class="muted">${ordered.length} finding(s) across ${scannedFileCount} scanned files/input blocks.</p>
+        <ul>
+          ${ordered.map((f) => {
+            const maxItems = expanded ? Number.MAX_SAFE_INTEGER : 3;
+            const evidenceItems = (f.evidence || []).slice(0, maxItems);
+            const evidence = evidenceItems.length
+              ? `<br/><span class="muted">evidence: ${escapeHtml(evidenceItems.join(", "))}${!expanded && f.evidence.length > maxItems ? ", ..." : ""}</span>`
+              : "";
+            const files = (f.files || []).length
+              ? `<br/><span class="muted">files: ${escapeHtml(f.files.slice(0, expanded ? Number.MAX_SAFE_INTEGER : 8).join(", "))}${!expanded && f.files.length > 8 ? ", ..." : ""}</span>`
+              : "";
+            return `<li><strong>${severityTag(f.severity)} ${escapeHtml(f.title)}</strong><br/>${escapeHtml(f.why)}<br/><span class="muted">${escapeHtml(f.action)}</span>${files}${evidence}</li>`;
+          }).join("")}
+        </ul>`;
+    }
+
+    const fileInput = document.getElementById("fileInput");
+    const folderInput = document.getElementById("folderInput");
+    const fileCount = document.getElementById("fileCount");
+    const codeInput = document.getElementById("codeInput");
+    const targetVersion = document.getElementById("targetVersion");
+    const analyzeBtn = document.getElementById("analyzeBtn");
+    const findingsEl = document.getElementById("findings");
+    const planEl = document.getElementById("plan");
+    const depChecksEl = document.getElementById("depChecks");
+    const depPrevBtn = document.getElementById("depPrevBtn");
+    const depNextBtn = document.getElementById("depNextBtn");
+    const depGroupBy = document.getElementById("depGroupBy");
+    const includeTransitive = document.getElementById("includeTransitive");
+    const internalPatterns = document.getElementById("internalPatterns");
+    const depPageInfo = document.getElementById("depPageInfo");
+    const repoCoverageEl = document.getElementById("repoCoverage");
+    const rewriteHintsEl = document.getElementById("rewriteHints");
+    const scanSummaryEl = document.getElementById("scanSummary");
+    const expandBtn = document.getElementById("expandBtn");
+    const findingGroupBy = document.getElementById("findingGroupBy");
+    const exportBtn = document.getElementById("exportBtn");
+    const exportFormat = document.getElementById("exportFormat");
+    const exportProfile = document.getElementById("exportProfile");
+    let lastReport = null;
+    let expanded = false;
+    let depPage = 1;
+    let analyzeInProgress = false;
+
+    function getInternalPrefixes() {
+      return parsePrefixList(internalPatterns && internalPatterns.value);
+    }
+
+    function withProjectTags(report) {
+      if (!report) return report;
+      const decorate = (items) => (items || []).map((i) => ({ ...i, projects: projectsForFiles(i.files || [], report.summary) }));
+      const depResults = decorate(report.dependencyChecks && report.dependencyChecks.results);
+      const unresolved = decorate(report.repoCoverage && report.repoCoverage.unresolvedList);
+      const depByProject = groupItemsByProject(depResults, report.summary).map(([project, items]) => ({
+        project,
+        count: items.length,
+        dependencies: items.map((d) => d.ga)
+      }));
+      return {
+        ...report,
+        findings: decorate(report.findings),
+        dependencyChecks: report.dependencyChecks ? { ...report.dependencyChecks, results: depResults } : report.dependencyChecks,
+        repoCoverage: report.repoCoverage ? { ...report.repoCoverage, unresolvedList: unresolved } : report.repoCoverage,
+        projectBreakdown: {
+          projectRoots: projectRootsFromSummary(report.summary),
+          dependencyCountByProject: depByProject
+        }
+      };
+    }
+
+    function renderPlan(plan) {
+      planEl.innerHTML = `<ul>${plan.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>`;
+    }
+
+    function filterReportForExport(report, profile, internalPrefixes) {
+      if (!report || profile === "all") return report;
+      const filtered = JSON.parse(JSON.stringify(report));
+      if (profile === "high-only") {
+        filtered.findings = (filtered.findings || []).filter((f) => String(f.severity || "").toLowerCase() === "high");
+        filtered.dependencyChecks.results = ((filtered.dependencyChecks && filtered.dependencyChecks.results) || [])
+          .filter((d) => String(d.severity || "").toLowerCase() === "high");
+      } else if (profile === "unresolved-only") {
+        filtered.findings = [];
+        filtered.dependencyChecks.results = ((filtered.dependencyChecks && filtered.dependencyChecks.results) || [])
+          .filter((d) => !(d.checked && d.source && d.source !== "none"));
+      } else if (profile === "internal-only") {
+        filtered.findings = [];
+        filtered.dependencyChecks.results = ((filtered.dependencyChecks && filtered.dependencyChecks.results) || [])
+          .filter((d) => isInternalCandidate(d, internalPrefixes));
+      }
+      if (filtered.dependencyChecks) {
+        filtered.dependencyChecks.checkedCount = (filtered.dependencyChecks.results || []).length;
+        filtered.dependencyChecks.totalDetected = (filtered.dependencyChecks.results || []).length;
+        filtered.dependencyChecks.pageCount = Math.max(1, Math.ceil(filtered.dependencyChecks.checkedCount / (filtered.dependencyChecks.pageSize || DEP_CHECK_PAGE_SIZE)));
+      }
+      filtered.repoCoverage = filtered.dependencyChecks ? computeRepoCoverage(filtered.dependencyChecks, internalPrefixes) : null;
+      filtered.rewriteSuggestions = buildRewriteSuggestions(filtered.findings || [], filtered.dependencyChecks || { results: [] });
+      return filtered;
+    }
+
+    function toTextReport(report) {
+      const lines = [
+        `Java Upgrade Report`,
+        `Target Java: ${report.target}`,
+        `Scanned files/input blocks: ${report.scannedFileCount}`,
+        `Scanned Java files: ${report.summary.javaCount}`,
+        `Scanned build files: ${report.summary.buildCount}`,
+        `Scanned config files: ${report.summary.configCount}`,
+        `Build files: ${(report.summary.buildFiles || []).join(", ") || "none detected"}`,
+        `Internal prefixes: ${(report.internalPrefixes || []).join(", ") || "(heuristic only)"}`,
+        `Generated at: ${new Date().toISOString()}`,
+        "",
+        "Findings:"
+      ];
+      if (!report.findings.length) {
+        lines.push("- No obvious migration blockers found.");
+      } else {
+        for (const f of report.findings) {
+          lines.push(`- [${f.severity.toUpperCase()}] ${f.title}`);
+          lines.push(`  Why: ${f.why}`);
+          lines.push(`  Action: ${f.action}`);
+          if ((f.files || []).length) lines.push(`  Files: ${f.files.join(", ")}`);
+          if ((f.projects || []).length) lines.push(`  Projects: ${f.projects.join(", ")}`);
+          if ((f.evidence || []).length) lines.push(`  Evidence: ${f.evidence.join(", ")}`);
+          lines.push("");
+        }
+      }
+      lines.push("Upgrade plan:");
+      for (const step of report.plan) lines.push(`- ${step}`);
+      lines.push("");
+      lines.push("Dependency checks:");
+      if (!report.dependencyChecks || !report.dependencyChecks.results.length) {
+        lines.push("- No dependencies checked.");
+      } else {
+        lines.push(`- Checked: ${report.dependencyChecks.checkedCount}/${report.dependencyChecks.totalDetected}`);
+        for (const d of report.dependencyChecks.results) {
+          lines.push(`- [${d.severity.toUpperCase()}] ${d.ga}`);
+          lines.push(`  current=${d.currentVersion}, latest=${d.latestVersion}`);
+          lines.push(`  note=${d.compatibility}`);
+          if (d.source) lines.push(`  source=${d.source}`);
+          if (d.note) lines.push(`  detail=${d.note}`);
+          if (d.transitiveCount) lines.push(`  transitive_1hop=${d.transitiveCount}`);
+          lines.push(`  files=${(d.files || []).join(", ")}`);
+        }
+      }
+      lines.push("");
+      lines.push("OpenRewrite suggestions:");
+      if (!(report.rewriteSuggestions || []).length) {
+        lines.push("- none");
+      } else {
+        for (const r of report.rewriteSuggestions) lines.push(`- ${r.recipe} (${r.why})`);
+      }
+      lines.push("");
+      lines.push("Repository coverage (internal artifacts):");
+      if (!report.repoCoverage) {
+        lines.push("- Not calculated.");
+      } else {
+        lines.push(`- resolved=${report.repoCoverage.resolvedInternal}/${report.repoCoverage.totalInternal} (${report.repoCoverage.coveragePercent}%), unresolved=${report.repoCoverage.unresolvedInternal}`);
+        for (const u of (report.repoCoverage.unresolvedList || []).slice(0, 50)) {
+          lines.push(`- ${u.ga} current=${u.currentVersion || "(unknown)"} source=${u.source || "none"} files=${(u.files || []).join(", ")}`);
+        }
+      }
+      return lines.join("\n");
+    }
+
+    function downloadFile(name, content, mimeType) {
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function csvCell(v) {
+      const s = String(v == null ? "" : v);
+      return `"${s.replaceAll("\"", "\"\"")}"`;
+    }
+
+    function reportCsv(report) {
+      const rows = [[
+        "kind",
+        "severity",
+        "title_or_ga",
+        "currentVersion",
+        "latestVersion",
+        "upgradeAvailable",
+        "compatibility_or_why",
+        "action_or_note",
+        "source",
+        "transitive_1hop",
+        "files",
+        "evidence",
+        "projects"
+      ]];
+      for (const f of ((report && report.findings) || [])) {
+        rows.push([
+          "finding",
+          f.severity || "",
+          f.title || "",
+          "",
+          "",
+          "",
+          f.why || "",
+          f.action || "",
+          "",
+          "",
+          (f.files || []).join("; "),
+          (f.evidence || []).join("; "),
+          (f.projects || []).join("; ")
+        ]);
+      }
+      for (const p of ((report && report.plan) || [])) {
+        rows.push([
+          "plan",
+          "",
+          p || "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          ""
+        ]);
+      }
+      for (const d of ((report && report.dependencyChecks && report.dependencyChecks.results) || [])) {
+        rows.push([
+          "dependency",
+          d.severity || "",
+          d.ga || "",
+          d.currentVersion || "",
+          d.latestVersion || "",
+          d.upgradeAvailable == null ? "" : String(d.upgradeAvailable),
+          d.compatibility || "",
+          d.note || "",
+          d.source || "",
+          d.transitiveCount || "",
+          (d.files || []).join("; "),
+          "",
+          (d.projects || []).join("; ")
+        ]);
+      }
+      if (report && report.repoCoverage) {
+        for (const u of (report.repoCoverage.unresolvedList || [])) {
+          rows.push([
+            "coverage-unresolved",
+            "",
+            u.ga || "",
+            u.currentVersion || "",
+            "",
+            "",
+            "",
+            "",
+            u.source || "",
+            "",
+            (u.files || []).join("; "),
+            "",
+            (u.projects || []).join("; ")
+          ]);
+        }
+        rows.push([
+          "coverage",
+          "",
+          "internal-artifact-coverage",
+          `${report.repoCoverage.resolvedInternal}/${report.repoCoverage.totalInternal}`,
+          "",
+          "",
+          `${report.repoCoverage.coveragePercent}%`,
+          `unresolved=${report.repoCoverage.unresolvedInternal}`,
+          "",
+          "",
+          "",
+          "",
+          ""
+        ]);
+      }
+      for (const r of ((report && report.rewriteSuggestions) || [])) {
+        rows.push([
+          "openrewrite",
+          "",
+          r.recipe || "",
+          "",
+          "",
+          "",
+          r.why || "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          ""
+        ]);
+      }
+      return rows.map((r) => r.map(csvCell).join(",")).join("\n");
+    }
+
+    function reportHtml(report) {
+      const findingsHtml = (report.findings || []).map((f) => {
+        const files = (f.files || []).length ? `<div><span class="muted">files:</span> ${escapeHtml((f.files || []).join(", "))}</div>` : "";
+        const projects = (f.projects || []).length ? `<div><span class="muted">projects:</span> ${escapeHtml((f.projects || []).join(", "))}</div>` : "";
+        const evidence = (f.evidence || []).length ? `<div><span class="muted">evidence:</span> ${escapeHtml((f.evidence || []).join(", "))}</div>` : "";
+        return `<li><strong>${severityTag(f.severity)} ${escapeHtml(f.title)}</strong><div>${escapeHtml(f.why)}</div><div class="muted">${escapeHtml(f.action)}</div>${files}${projects}${evidence}</li>`;
+      }).join("");
+      const depsHtml = ((report.dependencyChecks && report.dependencyChecks.results) || []).map((d) => `<tr><td>${severityTag(d.severity)}</td><td>${escapeHtml(d.ga)}</td><td>${escapeHtml(d.currentVersion || "")}</td><td>${escapeHtml(d.latestVersion || "")}</td><td>${escapeHtml(d.source || "none")}</td><td>${escapeHtml(String(d.transitiveCount || 0))}</td><td>${escapeHtml(d.compatibility || "")}</td><td>${escapeHtml(d.note || "")}</td><td>${escapeHtml((d.files || []).join(", "))}</td></tr>`).join("");
+      const rewriteHtml = ((report.rewriteSuggestions || []).map((r) => `<li><strong>${escapeHtml(r.recipe)}</strong><br/><span class="muted">${escapeHtml(r.why || "")}</span></li>`).join("")) || "<li>none</li>";
+      const coverage = report.repoCoverage || { resolvedInternal: 0, totalInternal: 0, coveragePercent: 0, unresolvedInternal: 0 };
+      const unresolvedRows = (coverage.unresolvedList || []).map((u) => `<tr><td>${escapeHtml(u.ga || "")}</td><td>${escapeHtml(u.currentVersion || "")}</td><td>${escapeHtml(u.source || "none")}</td><td>${escapeHtml((u.files || []).join(", "))}</td></tr>`).join("");
+      return `<!doctype html><html><head><meta charset="utf-8"/><title>Java Upgrade Report</title><style>
+body{font-family:system-ui,sans-serif;background:#0b1020;color:#e5e7eb;padding:20px}.card{background:#11172b;border:1px solid #1f2947;border-radius:10px;padding:14px;margin:10px 0}
+.muted{color:#94a3b8}.sev{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+.sev-high{background:#7f1d1d;color:#fecaca;border:1px solid #b91c1c}.sev-medium{background:#78350f;color:#fde68a;border:1px solid #d97706}.sev-low{background:#14532d;color:#bbf7d0;border:1px solid #22c55e}
+table{width:100%;border-collapse:collapse}td,th{border:1px solid #2b3656;padding:6px;text-align:left}th{background:#1a2340}
+</style></head><body>
+<h1>Java Upgrade Report</h1>
+<div class="card"><div>Target Java: <strong>${escapeHtml(report.target)}</strong></div><div>Scanned: ${escapeHtml(report.scannedFileCount || 0)} blocks (Java ${escapeHtml(report.summary && report.summary.javaCount || 0)}, build ${escapeHtml(report.summary && report.summary.buildCount || 0)}, config ${escapeHtml(report.summary && report.summary.configCount || 0)})</div><div class="muted">Generated: ${escapeHtml(new Date().toISOString())}</div></div>
+<div class="card"><h2>Findings</h2><ul>${findingsHtml || "<li>No findings</li>"}</ul></div>
+<div class="card"><h2>Upgrade plan</h2><ol>${(report.plan || []).map((p) => `<li>${escapeHtml(p)}</li>`).join("")}</ol></div>
+<div class="card"><h2>Dependency checks</h2><table><thead><tr><th>Severity</th><th>Dependency</th><th>Current</th><th>Latest</th><th>Source</th><th>Transitive(1-hop)</th><th>Compatibility</th><th>Detail</th><th>Files</th></tr></thead><tbody>${depsHtml || "<tr><td colspan='9'>No dependency results</td></tr>"}</tbody></table></div>
+<div class="card"><h2>OpenRewrite suggestions</h2><ul>${rewriteHtml}</ul></div>
+<div class="card"><h2>Repository coverage (internal artifacts)</h2><div>Resolved: <strong>${coverage.resolvedInternal}/${coverage.totalInternal}</strong> (${coverage.coveragePercent}%)</div><div>Unresolved: <strong>${coverage.unresolvedInternal}</strong></div><table><thead><tr><th>Dependency</th><th>Current</th><th>Source</th><th>Files</th></tr></thead><tbody>${unresolvedRows || "<tr><td colspan='4'>No unresolved internal artifacts</td></tr>"}</tbody></table></div>
+</body></html>`;
+    }
+
+    function summarizeEntries(entries) {
+      const javaFiles = entries.filter((e) => e.kind === "java").map((e) => e.name);
+      const buildFiles = entries.filter((e) => e.kind === "build").map((e) => e.name);
+      const configFiles = entries.filter((e) => e.kind === "config").map((e) => e.name);
+      return {
+        javaCount: javaFiles.length,
+        buildCount: buildFiles.length,
+        configCount: configFiles.length,
+        buildFiles: [...new Set(buildFiles)]
+      };
+    }
+
+    function updateDependencyView() {
+      const dep = lastReport && lastReport.dependencyChecks;
+      const prefixes = getInternalPrefixes();
+      if (!dep || dep.error) {
+        depChecksEl.innerHTML = dep && dep.error ? `<p class='muted'>${escapeHtml(dep.error)}</p>` : "<p class='muted'>Run analysis to check dependencies from pom/gradle files.</p>";
+        repoCoverageEl.innerHTML = "<p class='muted'>Run analysis to calculate internal artifact coverage.</p>";
+        depPrevBtn.disabled = true;
+        depNextBtn.disabled = true;
+        depPageInfo.textContent = "";
+        return;
+      }
+      const pageCount = dep.pageCount || Math.max(1, Math.ceil((dep.results || []).length / (dep.pageSize || DEP_CHECK_PAGE_SIZE)));
+      const grouped = (depGroupBy && depGroupBy.value) === "project";
+      depPage = Math.min(Math.max(depPage, 1), pageCount);
+      depChecksEl.innerHTML = renderDependencyChecksView(dep, lastReport.target, depPage, grouped ? "project" : "flat", lastReport.summary);
+      repoCoverageEl.innerHTML = renderRepoCoverage(lastReport.repoCoverage || computeRepoCoverage(dep, prefixes), grouped ? "project" : "flat", lastReport.summary);
+      depPrevBtn.disabled = grouped || depPage <= 1;
+      depNextBtn.disabled = grouped || depPage >= pageCount;
+      if (grouped) {
+        depPageInfo.textContent = `${groupItemsByProject(dep.results || [], lastReport.summary).length} project(s)`;
+      } else {
+        depPageInfo.textContent = `Page ${depPage}/${pageCount}`;
+      }
+    }
+
+    function updateCount() {
+      const allItems = [...Array.from(fileInput.files || []), ...Array.from(folderInput.files || [])];
+      const javaFiles = allItems.filter((f) => isJavaFile(f));
+      const analyzableFiles = allItems.filter((f) => isAnalyzableFile(f));
+      if (!allItems.length) {
+        fileCount.textContent = "0 files loaded";
+        return;
+      }
+      fileCount.textContent = `${javaFiles.length} .java files, ${analyzableFiles.length} analyzable files (from ${allItems.length} total)`;
+    }
+
+    fileInput.addEventListener("change", updateCount);
+    folderInput.addEventListener("change", updateCount);
+
+    analyzeBtn.addEventListener("click", async () => {
+      if (analyzeInProgress) {
+        findingsEl.innerHTML = "<p class='muted'>Analysis already running. Wait for it to finish.</p>";
+        return;
+      }
+      analyzeInProgress = true;
+      const oldAnalyzeText = analyzeBtn.textContent;
+      analyzeBtn.disabled = true;
+      analyzeBtn.textContent = "Analyzing...";
+      targetVersion.disabled = true;
+      try {
+        const selectedFiles = [...Array.from(fileInput.files || []), ...Array.from(folderInput.files || [])];
+        const analyzableFiles = selectedFiles.filter((f) => isAnalyzableFile(f));
+        const fileEntries = await Promise.all(
+          analyzableFiles.map(async (f) => ({
+            name: fullName(f),
+            kind: fileKindByName(fullName(f)),
+            content: await f.text()
+          }))
+        );
+        const pasted = codeInput.value.trim();
+        if (pasted) {
+          fileEntries.push({ name: "pasted-input", kind: "pasted", content: pasted });
+        }
+        if (!fileEntries.length) {
+          findingsEl.innerHTML = selectedFiles.length
+            ? "<p class='muted'>Files selected, but none are analyzable yet (.java, pom.xml, build.gradle, application.*). Add source/build files or paste code.</p>"
+            : "<p class='muted'>Add code first.</p>";
+          planEl.innerHTML = "<p class='muted'>No plan without code input.</p>";
+          return;
+        }
+
+        const target = Number(targetVersion.value);
+        const prefixes = getInternalPrefixes();
+        const result = analyzeEntries(fileEntries, target);
+        depChecksEl.innerHTML = "<p class='muted'>Checking dependencies against Maven Central...</p>";
+        depPrevBtn.disabled = true;
+        depNextBtn.disabled = true;
+        depPageInfo.textContent = "";
+        let dependencyChecks;
+        try {
+          dependencyChecks = await runDependencyChecks(fileEntries, target);
+        } catch (err) {
+          const msg = err && err.name === "AbortError"
+            ? "Dependency check timed out. Use fewer files or run server.py with internal repositories configured."
+            : "Dependency API unavailable. Start with: python3 server.py";
+          dependencyChecks = {
+            totalDetected: 0,
+            checkedCount: 0,
+            limited: false,
+            results: [],
+            error: msg
+          };
+        }
+        const plan = planFromAnalysis(result.findings, target, result.context);
+        const summary = summarizeEntries(fileEntries);
+        lastReport = {
+          target,
+          scannedFileCount: fileEntries.length,
+          summary,
+          findings: result.findings,
+          dependencyChecks,
+          repoCoverage: dependencyChecks.error ? null : computeRepoCoverage(dependencyChecks, prefixes),
+          plan,
+          context: result.context,
+          internalPrefixes: prefixes,
+          rewriteSuggestions: buildRewriteSuggestions(result.findings, dependencyChecks)
+        };
+        lastReport = withProjectTags(lastReport);
+        scanSummaryEl.textContent = `Scanned ${summary.javaCount} Java, ${summary.buildCount} build, ${summary.configCount} config files. Build files: ${summary.buildFiles.join(", ") || "none detected"}`;
+        findingsEl.innerHTML = renderFindings(lastReport.findings, lastReport.scannedFileCount, expanded, findingGroupBy.value, lastReport.summary);
+        renderPlan(plan);
+        rewriteHintsEl.innerHTML = renderRewriteSuggestions(lastReport.rewriteSuggestions || []);
+        depPage = 1;
+        updateDependencyView();
+      } finally {
+        analyzeInProgress = false;
+        analyzeBtn.disabled = false;
+        analyzeBtn.textContent = oldAnalyzeText;
+        targetVersion.disabled = false;
+      }
+    });
+
+    expandBtn.addEventListener("click", () => {
+      if (!lastReport) {
+        findingsEl.innerHTML = "<p class='muted'>Run Analyze first.</p>";
+        return;
+      }
+      expanded = !expanded;
+      expandBtn.textContent = expanded ? "Collapse all" : "Expand all";
+      findingsEl.innerHTML = renderFindings(lastReport.findings, lastReport.scannedFileCount, expanded, findingGroupBy.value, lastReport.summary);
+    });
+
+    exportBtn.addEventListener("click", () => {
+      if (!lastReport) {
+        findingsEl.innerHTML = "<p class='muted'>Run Analyze first, then export report.</p>";
+        return;
+      }
+      const stamp = new Date().toISOString().replaceAll(":", "-");
+      const fmt = exportFormat.value || "all";
+      const profile = exportProfile.value || "all";
+      const exportReport = filterReportForExport(lastReport, profile, getInternalPrefixes());
+      if (fmt === "all" || fmt === "txt") downloadFile(`java-upgrade-report-${profile}-${stamp}.txt`, toTextReport(exportReport), "text/plain;charset=utf-8");
+      if (fmt === "all" || fmt === "json") downloadFile(`java-upgrade-report-${profile}-${stamp}.json`, JSON.stringify(exportReport, null, 2), "application/json;charset=utf-8");
+      if (fmt === "all" || fmt === "csv") downloadFile(`java-upgrade-report-${profile}-${stamp}.csv`, reportCsv(exportReport), "text/csv;charset=utf-8");
+      if (fmt === "all" || fmt === "html") downloadFile(`java-upgrade-report-${profile}-${stamp}.html`, reportHtml(exportReport), "text/html;charset=utf-8");
+    });
+
+    depPrevBtn.addEventListener("click", () => {
+      depPage -= 1;
+      updateDependencyView();
+    });
+
+    depNextBtn.addEventListener("click", () => {
+      depPage += 1;
+      updateDependencyView();
+    });
+
+    depGroupBy.addEventListener("change", () => {
+      depPage = 1;
+      updateDependencyView();
+    });
+
+    const savedPrefixes = localStorage.getItem("java-upgrade.internal-prefixes");
+    if (savedPrefixes && internalPatterns) internalPatterns.value = savedPrefixes;
+    if (internalPatterns) {
+      internalPatterns.addEventListener("change", () => {
+        localStorage.setItem("java-upgrade.internal-prefixes", internalPatterns.value || "");
+        if (lastReport && lastReport.dependencyChecks && !lastReport.dependencyChecks.error) {
+          lastReport.internalPrefixes = getInternalPrefixes();
+          lastReport.repoCoverage = computeRepoCoverage(lastReport.dependencyChecks, getInternalPrefixes());
+          updateDependencyView();
+        }
+      });
+    }
+
+    findingGroupBy.addEventListener("change", () => {
+      if (!lastReport) return;
+      findingsEl.innerHTML = renderFindings(lastReport.findings, lastReport.scannedFileCount, expanded, findingGroupBy.value, lastReport.summary);
+    });
+
+    (function selfCheck() {
+      const sampleEntries = [
+        { name: "A.java", kind: "java", content: "import sun.misc.Unsafe; class A { void finalize(){} }" },
+        { name: "pom.xml", kind: "build", content: "<project><properties><java.version>8</java.version><spring-boot.version>2.7.18</spring-boot.version></properties></project>" },
+        { name: "pasted-input", kind: "pasted", content: "import javax.persistence.Entity;" }
+      ];
+      const mavenModelEntries = [
+        { name: "root/pom.xml", kind: "build", content: "<project><modelVersion>4.0.0</modelVersion><groupId>acme</groupId><artifactId>root</artifactId><version>1.0</version><properties><junit.version>4.13.2</junit.version></properties><dependencyManagement><dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>${junit.version}</version></dependency></dependencies></dependencyManagement></project>" },
+        { name: "root/child/pom.xml", kind: "build", content: "<project><modelVersion>4.0.0</modelVersion><parent><groupId>acme</groupId><artifactId>root</artifactId><version>1.0</version><relativePath>../pom.xml</relativePath></parent><artifactId>child</artifactId><dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId></dependency></dependencies></project>" }
+      ];
+      const matrixMismatchEntries = [
+        { name: "m/pom.xml", kind: "build", content: "<project><modelVersion>4.0.0</modelVersion><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>4.0.0</version></parent><groupId>x</groupId><artifactId>m</artifactId><version>1.0.0</version><dependencies><dependency><groupId>org.springframework</groupId><artifactId>spring-core</artifactId><version>5.3.39</version></dependency></dependencies></project>" }
+      ];
+      const result = analyzeEntries(sampleEntries, 17);
+      const matrixMismatchResult = analyzeEntries(matrixMismatchEntries, 17);
+      const summary = summarizeEntries(sampleEntries);
+      const depSample = { totalDetected: 1, checkedCount: 1, pageSize: 30, pageCount: 1, results: [{ ga: "org.springframework.boot:spring-boot-starter-web", currentVersion: "2.7.18", latestVersion: "3.3.1", upgradeAvailable: true, compatibility: "Boot 2.x on Java 17+ path. Plan move to Boot 3.x (Jakarta migration).", severity: "high", files: ["pom.xml"], checked: true }] };
+      const covSample = computeRepoCoverage(depSample);
+      const resolvedDeps = extractDependencies(mavenModelEntries);
+      const plan = planFromAnalysis(result.findings, 17, result.context).join(" ");
+      const html = renderFindings(result.findings, sampleEntries.length, true, "flat", summary);
+      const depHtml = renderDependencyChecks(depSample, 17, 1);
+      const text = toTextReport({ target: 17, scannedFileCount: sampleEntries.length, summary, findings: result.findings, dependencyChecks: depSample, repoCoverage: covSample, plan: planFromAnalysis(result.findings, 17, result.context), context: result.context });
+      const depCsv = reportCsv({ findings: result.findings, dependencyChecks: depSample, repoCoverage: covSample, plan: [] });
+      const htmlReport = reportHtml({ target: 17, findings: result.findings, dependencyChecks: depSample, repoCoverage: covSample, plan: ["1) x"] });
+      console.assert(isJavaFile({ name: "A.java" }), "Self-check failed: expected java file");
+      console.assert(isAnalyzableFile({ name: "pom.xml" }), "Self-check failed: expected analyzable build file");
+      console.assert(result.findings.some((f) => f.title.includes("Spring Boot 2.x")), "Self-check failed: expected Spring Boot finding");
+      console.assert(result.findings.some((f) => f.title.includes("Framework compatibility matrix")), "Self-check failed: expected matrix finding");
+      console.assert(matrixMismatchResult.findings.some((f) => f.title.includes("Matrix mismatch: Boot")), "Self-check failed: expected matrix mismatch finding");
+      console.assert(plan.includes("Boot 3.x"), "Self-check failed: expected Boot 3.x plan step");
+      console.assert(html.includes("files:"), "Self-check failed: expected expanded files output");
+      console.assert(summary.buildCount === 1, "Self-check failed: expected build file count");
+      console.assert(depHtml.includes("spring-boot-starter-web"), "Self-check failed: expected dependency check rendering");
+      console.assert(typeof covSample.coveragePercent === "number", "Self-check failed: expected coverage calculation");
+      console.assert(resolvedDeps.some((d) => d.groupId === "junit" && d.artifactId === "junit" && d.version === "4.13.2"), "Self-check failed: expected maven parent/dm resolution");
+      console.assert(text.includes("Upgrade plan:"), "Self-check failed: expected text export body");
+      console.assert(text.includes("Dependency checks:"), "Self-check failed: expected dependency section in export");
+      console.assert(text.includes("Repository coverage (internal artifacts):"), "Self-check failed: expected coverage section in export");
+      console.assert(depCsv.includes("org.springframework.boot:spring-boot-starter-web"), "Self-check failed: expected report csv export");
+      console.assert(htmlReport.includes("<table>") && htmlReport.includes("Repository coverage"), "Self-check failed: expected html report export");
+    })();
+  </script>
+</body>
+</html>
