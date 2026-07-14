@@ -12,6 +12,20 @@ cd /opt/java-upgreaer
 python3 server.py
 ```
 
+Or run in a container (works with Docker and Podman):
+
+```bash
+cd /opt/java-upgreaer
+docker build -t java-upgrade-helper .
+docker run --rm -p 8765:8765 java-upgrade-helper
+```
+
+```bash
+cd /opt/java-upgreaer
+podman build -t java-upgrade-helper .
+podman run --rm -p 8765:8765 java-upgrade-helper
+```
+
 3. Open in browser: `http://127.0.0.1:8765/index.html`
 4. Add code in any way:
    - paste Java code in the text box, or
@@ -74,6 +88,7 @@ python3 server.py
 ## Project docs
 
 - `README.md` -> usage and run instructions
+- `Dockerfile` -> container image for Docker/Podman
 - `FEATURES.md` -> feature status and backlog
 - `PLAN.md` -> implementation roadmap
 

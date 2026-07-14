@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+*.crdownload
+java-upgrade-report-*
+PLAN.md
+FEATURES.md
+.git
