@@ -103,6 +103,9 @@ Useful flags:
 ## Project docs
 
 - `README.md` -> usage and run instructions
+- `ARCHITECTURE.md` -> architecture diagram and component/data-flow overview
+- `PROCESS.md` -> workflow/runbook for planning and executing upgrades
+- `REPO_UPGRADE_GUIDE.md` -> how repo analysis works and what upgrade info it gives
 - `Dockerfile` -> container image for Docker/Podman
 - `FEATURES.md` -> feature status and backlog
 - `PLAN.md` -> implementation roadmap
