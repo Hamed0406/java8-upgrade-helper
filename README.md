@@ -27,14 +27,14 @@ python3 server.py
 8. Optional:
    - **Expand all / Collapse all** to show full file and evidence lists
    - Switch findings **View** to **By project** to group findings by module/project path
-   - Choose export **Profile**: `All`, `High only`, `Unresolved deps only`, `Internal only`
+   - Choose export **Profile**: `All`, `By project`, `High only`, `Unresolved deps only`, `Internal only`
    - **Export report** with selectable format: `JSON`, `TXT`, `CSV`, `HTML`, or `ALL`
    - **Prev deps / Next deps** to page through dependency results
    - Switch dependency **View** to **By project** to group results by module/project path
    - Toggle **1-hop transitive** dependency lookup
    - Set **Internal prefixes** (comma-separated) to improve internal artifact coverage detection
 9. Review **OpenRewrite suggestions** section for ready-to-apply recipe IDs.
-9. Check the scan summary line under Findings to confirm build files like `pom.xml` were included.
+10. Check the scan summary line under Findings to confirm build files like `pom.xml` were included.
 
 ## What it currently checks
 

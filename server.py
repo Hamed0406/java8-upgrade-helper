@@ -124,6 +124,7 @@ def fetch_text(url, headers):
 
 
 def resolve_latest(group_id, artifact_id, repos, internal_repos):
+    # Repo order matters: internal repos are checked first, then Maven Central fallback.
     for repo in repos:
         meta_url = build_metadata_url(repo, group_id, artifact_id)
         try:
@@ -149,6 +150,7 @@ def lookup_one(dep, repos, internal_repos, include_transitive, per_dep_limit):
     lookup = resolve_latest(group_id, artifact_id, repos, internal_repos)
     out = {"ga": ga, **lookup}
     if include_transitive:
+        # Use explicit version when present; otherwise use resolved latest as a practical 1-hop baseline.
         version_for_pom = current_version or lookup.get("latestVersion")
         transitive = resolve_one_hop_transitive(
             group_id,
@@ -329,6 +331,7 @@ def resolve_one_hop_transitive(group_id, artifact_id, version, repos, internal_r
     out = []
     seen = set()
     for d in model.get("dependencies") or []:
+        # Keep transitive graph bounded and migration-focused by skipping test/provided scopes.
         scope = (interpolate(d.get("scope") or "", props) or "").lower()
         if scope in {"test", "provided"}:
             continue
@@ -484,6 +487,7 @@ def resolve_maven_dependencies(local_poms, repos, internal_repos):
 
 class Handler(SimpleHTTPRequestHandler):
     def _rid(self):
+        # Short request id keeps logs readable while still correlating start/end entries.
         return uuid.uuid4().hex[:8]
 
     def log_message(self, format, *args):
@@ -558,6 +562,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if item is not None:
                         results.append(item)
                 except Exception as err:
+                    # One failed worker should not fail the entire dependency-check response.
                     LOGGER.warning("[rid=%s] dependency lookup worker failed: %s", rid, err)
 
         ok_count = sum(1 for r in results if r.get("status") == "ok")

@@ -72,6 +72,7 @@
         <label for="exportProfile">Profile:</label>
         <select id="exportProfile">
           <option value="all" selected>All</option>
+          <option value="by-project">By project</option>
           <option value="high-only">High only</option>
           <option value="unresolved-only">Unresolved deps only</option>
           <option value="internal-only">Internal only</option>
@@ -765,6 +766,7 @@
         deps = [...pomLocal, ...gradleLocal];
       }
       const includeTransitiveDeps = !!(includeTransitive && includeTransitive.checked);
+      // Keep transitive chunks small so one slow artifact does not stall a large full scan.
       const apiChunkSize = includeTransitiveDeps ? 8 : DEP_CHECK_PAGE_SIZE;
       const transitivePerDepLimit = includeTransitiveDeps ? 12 : 0;
       const results = [];
@@ -1174,20 +1176,31 @@
       if (!report) return report;
       const decorate = (items) => (items || []).map((i) => ({ ...i, projects: projectsForFiles(i.files || [], report.summary) }));
       const depResults = decorate(report.dependencyChecks && report.dependencyChecks.results);
+      const findings = decorate(report.findings);
       const unresolved = decorate(report.repoCoverage && report.repoCoverage.unresolvedList);
+      const findingByProject = groupItemsByProject(findings, report.summary).map(([project, items]) => ({
+        project,
+        count: items.length
+      }));
       const depByProject = groupItemsByProject(depResults, report.summary).map(([project, items]) => ({
         project,
         count: items.length,
         dependencies: items.map((d) => d.ga)
       }));
+      const unresolvedByProject = groupItemsByProject(unresolved, report.summary).map(([project, items]) => ({
+        project,
+        count: items.length
+      }));
       return {
         ...report,
-        findings: decorate(report.findings),
+        findings,
         dependencyChecks: report.dependencyChecks ? { ...report.dependencyChecks, results: depResults } : report.dependencyChecks,
         repoCoverage: report.repoCoverage ? { ...report.repoCoverage, unresolvedList: unresolved } : report.repoCoverage,
         projectBreakdown: {
           projectRoots: projectRootsFromSummary(report.summary),
-          dependencyCountByProject: depByProject
+          findingCountByProject: findingByProject,
+          dependencyCountByProject: depByProject,
+          unresolvedInternalByProject: unresolvedByProject
         }
       };
     }
@@ -1199,7 +1212,9 @@
     function filterReportForExport(report, profile, internalPrefixes) {
       if (!report || profile === "all") return report;
       const filtered = JSON.parse(JSON.stringify(report));
-      if (profile === "high-only") {
+      if (profile === "by-project") {
+        // keep all rows; export renderers will include by-project sections
+      } else if (profile === "high-only") {
         filtered.findings = (filtered.findings || []).filter((f) => String(f.severity || "").toLowerCase() === "high");
         filtered.dependencyChecks.results = ((filtered.dependencyChecks && filtered.dependencyChecks.results) || [])
           .filter((d) => String(d.severity || "").toLowerCase() === "high");
@@ -1219,7 +1234,7 @@
       }
       filtered.repoCoverage = filtered.dependencyChecks ? computeRepoCoverage(filtered.dependencyChecks, internalPrefixes) : null;
       filtered.rewriteSuggestions = buildRewriteSuggestions(filtered.findings || [], filtered.dependencyChecks || { results: [] });
-      return filtered;
+      return withProjectTags(filtered);
     }
 
     function toTextReport(report) {
@@ -1268,6 +1283,11 @@
         }
       }
       lines.push("");
+      if (report.exportProfile === "by-project" && report.projectBreakdown) {
+        lines.push("Findings by project:");
+        for (const p of (report.projectBreakdown.findingCountByProject || [])) lines.push(`- ${p.project}: ${p.count}`);
+        lines.push("");
+      }
       lines.push("OpenRewrite suggestions:");
       if (!(report.rewriteSuggestions || []).length) {
         lines.push("- none");
@@ -1275,6 +1295,14 @@
         for (const r of report.rewriteSuggestions) lines.push(`- ${r.recipe} (${r.why})`);
       }
       lines.push("");
+      if (report.exportProfile === "by-project" && report.projectBreakdown) {
+        lines.push("Dependencies by project:");
+        for (const p of (report.projectBreakdown.dependencyCountByProject || [])) lines.push(`- ${p.project}: ${p.count}`);
+        lines.push("");
+        lines.push("Unresolved internal by project:");
+        for (const p of (report.projectBreakdown.unresolvedInternalByProject || [])) lines.push(`- ${p.project}: ${p.count}`);
+        lines.push("");
+      }
       lines.push("Repository coverage (internal artifacts):");
       if (!report.repoCoverage) {
         lines.push("- Not calculated.");
@@ -1422,6 +1450,17 @@
           ""
         ]);
       }
+      if (report && report.exportProfile === "by-project" && report.projectBreakdown) {
+        for (const p of (report.projectBreakdown.findingCountByProject || [])) {
+          rows.push(["finding-project-summary", "", p.project || "", p.count || "", "", "", "", "", "", "", "", "", ""]);
+        }
+        for (const p of (report.projectBreakdown.dependencyCountByProject || [])) {
+          rows.push(["dependency-project-summary", "", p.project || "", p.count || "", "", "", "", "", "", "", "", "", ""]);
+        }
+        for (const p of (report.projectBreakdown.unresolvedInternalByProject || [])) {
+          rows.push(["coverage-project-summary", "", p.project || "", p.count || "", "", "", "", "", "", "", "", "", ""]);
+        }
+      }
       return rows.map((r) => r.map(csvCell).join(",")).join("\n");
     }
 
@@ -1436,6 +1475,13 @@
       const rewriteHtml = ((report.rewriteSuggestions || []).map((r) => `<li><strong>${escapeHtml(r.recipe)}</strong><br/><span class="muted">${escapeHtml(r.why || "")}</span></li>`).join("")) || "<li>none</li>";
       const coverage = report.repoCoverage || { resolvedInternal: 0, totalInternal: 0, coveragePercent: 0, unresolvedInternal: 0 };
       const unresolvedRows = (coverage.unresolvedList || []).map((u) => `<tr><td>${escapeHtml(u.ga || "")}</td><td>${escapeHtml(u.currentVersion || "")}</td><td>${escapeHtml(u.source || "none")}</td><td>${escapeHtml((u.files || []).join(", "))}</td></tr>`).join("");
+      const projectSummaryCard = report.exportProfile === "by-project" && report.projectBreakdown
+        ? `<div class="card"><h2>Project summary</h2><table><thead><tr><th>Project</th><th>Findings</th><th>Dependencies</th><th>Unresolved internal</th></tr></thead><tbody>${(report.projectBreakdown.dependencyCountByProject || []).map((d) => {
+          const f = ((report.projectBreakdown.findingCountByProject || []).find((x) => x.project === d.project) || {}).count || 0;
+          const u = ((report.projectBreakdown.unresolvedInternalByProject || []).find((x) => x.project === d.project) || {}).count || 0;
+          return `<tr><td>${escapeHtml(d.project)}</td><td>${escapeHtml(String(f))}</td><td>${escapeHtml(String(d.count || 0))}</td><td>${escapeHtml(String(u))}</td></tr>`;
+        }).join("")}</tbody></table></div>`
+        : "";
       return `<!doctype html><html><head><meta charset="utf-8"/><title>Java Upgrade Report</title><style>
 body{font-family:system-ui,sans-serif;background:#0b1020;color:#e5e7eb;padding:20px}.card{background:#11172b;border:1px solid #1f2947;border-radius:10px;padding:14px;margin:10px 0}
 .muted{color:#94a3b8}.sev{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
@@ -1447,6 +1493,7 @@ table{width:100%;border-collapse:collapse}td,th{border:1px solid #2b3656;padding
 <div class="card"><h2>Findings</h2><ul>${findingsHtml || "<li>No findings</li>"}</ul></div>
 <div class="card"><h2>Upgrade plan</h2><ol>${(report.plan || []).map((p) => `<li>${escapeHtml(p)}</li>`).join("")}</ol></div>
 <div class="card"><h2>Dependency checks</h2><table><thead><tr><th>Severity</th><th>Dependency</th><th>Current</th><th>Latest</th><th>Source</th><th>Transitive(1-hop)</th><th>Compatibility</th><th>Detail</th><th>Files</th></tr></thead><tbody>${depsHtml || "<tr><td colspan='9'>No dependency results</td></tr>"}</tbody></table></div>
+${projectSummaryCard}
 <div class="card"><h2>OpenRewrite suggestions</h2><ul>${rewriteHtml}</ul></div>
 <div class="card"><h2>Repository coverage (internal artifacts)</h2><div>Resolved: <strong>${coverage.resolvedInternal}/${coverage.totalInternal}</strong> (${coverage.coveragePercent}%)</div><div>Unresolved: <strong>${coverage.unresolvedInternal}</strong></div><table><thead><tr><th>Dependency</th><th>Current</th><th>Source</th><th>Files</th></tr></thead><tbody>${unresolvedRows || "<tr><td colspan='4'>No unresolved internal artifacts</td></tr>"}</tbody></table></div>
 </body></html>`;
@@ -1504,6 +1551,7 @@ table{width:100%;border-collapse:collapse}td,th{border:1px solid #2b3656;padding
     folderInput.addEventListener("change", updateCount);
 
     analyzeBtn.addEventListener("click", async () => {
+      // Prevent overlapping scans when user changes target and clicks Analyze repeatedly.
       if (analyzeInProgress) {
         findingsEl.innerHTML = "<p class='muted'>Analysis already running. Wait for it to finish.</p>";
         return;
@@ -1605,6 +1653,7 @@ table{width:100%;border-collapse:collapse}td,th{border:1px solid #2b3656;padding
       const fmt = exportFormat.value || "all";
       const profile = exportProfile.value || "all";
       const exportReport = filterReportForExport(lastReport, profile, getInternalPrefixes());
+      exportReport.exportProfile = profile;
       if (fmt === "all" || fmt === "txt") downloadFile(`java-upgrade-report-${profile}-${stamp}.txt`, toTextReport(exportReport), "text/plain;charset=utf-8");
       if (fmt === "all" || fmt === "json") downloadFile(`java-upgrade-report-${profile}-${stamp}.json`, JSON.stringify(exportReport, null, 2), "application/json;charset=utf-8");
       if (fmt === "all" || fmt === "csv") downloadFile(`java-upgrade-report-${profile}-${stamp}.csv`, reportCsv(exportReport), "text/csv;charset=utf-8");
