@@ -50,6 +50,21 @@ podman run --rm -p 8765:8765 java-upgrade-helper
 9. Review **OpenRewrite suggestions** section for ready-to-apply recipe IDs.
 10. Check the scan summary line under Findings to confirm build files like `pom.xml` were included.
 
+## Headless CLI scan (no browser)
+
+Run scan directly from terminal:
+
+```bash
+cd /opt/java-upgreaer
+python3 scan.py --path ./my-java-repo --target 17 --format json --out report.json
+```
+
+Useful flags:
+- `--include-transitive` -> enable 1-hop transitive dependency lookup
+- `--skip-deps` -> skip dependency checks (faster/offline)
+- `--internal-prefixes c2b,com.myco` -> improve internal artifact coverage
+- `--format all` -> write JSON/TXT/CSV/HTML files
+
 ## What it currently checks
 
 - Internal JDK API usage (`sun.*`, `com.sun.*`)
@@ -135,6 +150,7 @@ cd /opt/java-upgreaer
 python3 -m unittest -v test_dependency_api.py
 python3 -m unittest -v test_server_auth.py
 python3 -m unittest -v test_maven_resolve_api.py
+python3 -m unittest -v test_scan_cli.py
 ```
 
 ## CI / CLI mode (pipeline gate)
