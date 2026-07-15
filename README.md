@@ -2,6 +2,8 @@
 
 Small browser tool to help developers migrate code from **Java 8** to newer Java versions (default guidance targets **Java 17 LTS**).
 
+Live project: **https://jdkjump.hadeli.me/**
+
 ## Most important: how to use the tool
 
 1. Open this folder in terminal.
