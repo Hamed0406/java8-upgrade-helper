@@ -93,6 +93,15 @@
     </div>
 
     <div class="card">
+      <h2>Upgrade effort estimate</h2>
+      <div class="row">
+        <label for="daysPerPoint">Days per point:</label>
+        <input id="daysPerPoint" type="number" min="0.1" step="0.1" value="0.6" />
+      </div>
+      <div id="estimate"><p class="muted">Run analysis to estimate effort.</p></div>
+    </div>
+
+    <div class="card">
       <h2>Dependency checks</h2>
       <div class="row">
         <button id="depPrevBtn" type="button">Prev deps</button>
@@ -1165,6 +1174,8 @@
     const scanSummaryEl = document.getElementById("scanSummary");
     const expandBtn = document.getElementById("expandBtn");
     const findingGroupBy = document.getElementById("findingGroupBy");
+    const daysPerPoint = document.getElementById("daysPerPoint");
+    const estimateEl = document.getElementById("estimate");
     const exportBtn = document.getElementById("exportBtn");
     const exportFormat = document.getElementById("exportFormat");
     const exportProfile = document.getElementById("exportProfile");
@@ -1212,6 +1223,67 @@
 
     function renderPlan(plan) {
       planEl.innerHTML = `<ul>${plan.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>`;
+    }
+
+    function toPositiveNumber(value, fallback) {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    }
+
+    function estimateFromReport(report, daysPerPoint) {
+      const pointDays = toPositiveNumber(daysPerPoint, 0.6);
+      const riskMultiplier = { high: 1.5, medium: 1.3, low: 1.15 };
+      const findingBase = { high: 5, medium: 3, low: 1 };
+      const depBase = { high: 3, medium: 2, low: 1 };
+      const byProject = new Map();
+      const blockers = [];
+
+      function addCost(label, severity, files, points) {
+        const sev = String(severity || "medium").toLowerCase();
+        const mult = riskMultiplier[sev] || riskMultiplier.medium;
+        const days = points * pointDays * mult;
+        const projects = projectsForFiles(files || [], report.summary);
+        for (const p of projects) byProject.set(p, (byProject.get(p) || 0) + days);
+        blockers.push({ label, severity: sev, points, days });
+        return { points, days };
+      }
+
+      let totalPoints = 0;
+      let totalDays = 0;
+      for (const f of (report.findings || [])) {
+        const sev = String(f.severity || "medium").toLowerCase();
+        let points = findingBase[sev] || findingBase.medium;
+        if (/matrix mismatch|internal jdk api|legacy javax/i.test(String(f.title || ""))) points += 1;
+        const cost = addCost(f.title || "Finding", sev, f.files || [], points);
+        totalPoints += cost.points;
+        totalDays += cost.days;
+      }
+      for (const d of (((report.dependencyChecks || {}).results) || [])) {
+        const sev = String(d.severity || "medium").toLowerCase();
+        let points = depBase[sev] || depBase.medium;
+        if (!d.checked) points += 1;
+        const cost = addCost(d.ga || "Dependency", sev, d.files || [], points);
+        totalPoints += cost.points;
+        totalDays += cost.days;
+      }
+      const byProjectRows = [...byProject.entries()]
+        .map(([project, days]) => ({ project, days }))
+        .sort((a, b) => b.days - a.days)
+        .slice(0, 10);
+      const topBlockers = blockers.sort((a, b) => b.days - a.days).slice(0, 10);
+      return { totalPoints, totalDays, byProjectRows, topBlockers, pointDays };
+    }
+
+    function renderEstimate(report, daysPerPoint) {
+      if (!report) return "<p class='muted'>Run analysis to estimate effort.</p>";
+      const est = estimateFromReport(report, daysPerPoint);
+      const blockersHtml = est.topBlockers.length
+        ? `<ul>${est.topBlockers.map((b) => `<li><strong>${severityTag(b.severity)} ${escapeHtml(b.label)}</strong><br/><span class="muted">points: ${b.points.toFixed(1)} | est days: ${b.days.toFixed(1)}</span></li>`).join("")}</ul>`
+        : "<p class='muted'>No blockers to estimate.</p>";
+      const projectsHtml = est.byProjectRows.length
+        ? `<table><thead><tr><th>Project</th><th>Estimated days</th></tr></thead><tbody>${est.byProjectRows.map((r) => `<tr><td>${escapeHtml(r.project)}</td><td>${r.days.toFixed(1)}</td></tr>`).join("")}</tbody></table>`
+        : "<p class='muted'>No project breakdown available.</p>";
+      return `<p class="muted">Estimated total: <strong>${est.totalDays.toFixed(1)} dev-days</strong> | points: <strong>${est.totalPoints.toFixed(1)}</strong> | days/point: ${est.pointDays}</p><h3>Top blockers</h3>${blockersHtml}<h3>By project</h3>${projectsHtml}`;
     }
 
     function filterReportForExport(report, profile, internalPrefixes) {
@@ -1628,6 +1700,7 @@ ${projectSummaryCard}
         scanSummaryEl.textContent = `Scanned ${summary.javaCount} Java, ${summary.buildCount} build, ${summary.configCount} config files. Build files: ${summary.buildFiles.join(", ") || "none detected"}`;
         findingsEl.innerHTML = renderFindings(lastReport.findings, lastReport.scannedFileCount, expanded, findingGroupBy.value, lastReport.summary);
         renderPlan(plan);
+        estimateEl.innerHTML = renderEstimate(lastReport, daysPerPoint && daysPerPoint.value);
         rewriteHintsEl.innerHTML = renderRewriteSuggestions(lastReport.rewriteSuggestions || []);
         depPage = 1;
         updateDependencyView();
@@ -1698,6 +1771,11 @@ ${projectSummaryCard}
       findingsEl.innerHTML = renderFindings(lastReport.findings, lastReport.scannedFileCount, expanded, findingGroupBy.value, lastReport.summary);
     });
 
+    daysPerPoint.addEventListener("change", () => {
+      if (!lastReport) return;
+      estimateEl.innerHTML = renderEstimate(lastReport, daysPerPoint.value);
+    });
+
     (function selfCheck() {
       const sampleEntries = [
         { name: "A.java", kind: "java", content: "import sun.misc.Unsafe; class A { void finalize(){} }" },
@@ -1720,6 +1798,7 @@ ${projectSummaryCard}
       const plan = planFromAnalysis(result.findings, 17, result.context).join(" ");
       const html = renderFindings(result.findings, sampleEntries.length, true, "flat", summary);
       const depHtml = renderDependencyChecks(depSample, 17, 1);
+      const estimateHtml = renderEstimate({ target: 17, scannedFileCount: sampleEntries.length, summary, findings: result.findings, dependencyChecks: depSample, repoCoverage: covSample, plan: planFromAnalysis(result.findings, 17, result.context), context: result.context }, 0.6);
       const text = toTextReport({ target: 17, scannedFileCount: sampleEntries.length, summary, findings: result.findings, dependencyChecks: depSample, repoCoverage: covSample, plan: planFromAnalysis(result.findings, 17, result.context), context: result.context });
       const depCsv = reportCsv({ findings: result.findings, dependencyChecks: depSample, repoCoverage: covSample, plan: [] });
       const htmlReport = reportHtml({ target: 17, findings: result.findings, dependencyChecks: depSample, repoCoverage: covSample, plan: ["1) x"] });
@@ -1732,6 +1811,7 @@ ${projectSummaryCard}
       console.assert(html.includes("files:"), "Self-check failed: expected expanded files output");
       console.assert(summary.buildCount === 1, "Self-check failed: expected build file count");
       console.assert(depHtml.includes("spring-boot-starter-web"), "Self-check failed: expected dependency check rendering");
+      console.assert(estimateHtml.includes("Estimated total"), "Self-check failed: expected estimation rendering");
       console.assert(typeof covSample.coveragePercent === "number", "Self-check failed: expected coverage calculation");
       console.assert(resolvedDeps.some((d) => d.groupId === "junit" && d.artifactId === "junit" && d.version === "4.13.2"), "Self-check failed: expected maven parent/dm resolution");
       console.assert(text.includes("Upgrade plan:"), "Self-check failed: expected text export body");

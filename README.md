@@ -47,6 +47,7 @@ podman run --rm -p 8765:8765 java-upgrade-helper
    - Switch dependency **View** to **By project** to group results by module/project path
    - Toggle **1-hop transitive** dependency lookup
    - Set **Internal prefixes** (comma-separated) to improve internal artifact coverage detection
+   - Tune **Days per point** in **Upgrade effort estimate** to convert findings into estimated dev-days
 9. Review **OpenRewrite suggestions** section for ready-to-apply recipe IDs.
 10. Check the scan summary line under Findings to confirm build files like `pom.xml` were included.
 
